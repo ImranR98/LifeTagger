@@ -1,0 +1,11 @@
+{
+  "name": "lifetagger",
+  "version": "1.0.0",
+  "description": "Add searchable tags to your vast media library, one batch at a time.",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js"
+  },
+  "author": "Imran Remtulla",
+  "license": "ISC"
+}
