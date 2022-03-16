@@ -19,16 +19,28 @@ Possible future upgrades:
 2. A server version of this that can be hosted by a user, then accessed any time from their phone or PC; also giving them daily notification reminders
 */
 
-// Before anything else, prepare the environment variables
-require('./prepEnv').prepEnv()
+const helpers = require('./helpers')
 
-const fs = require('fs')
-const open = require('open')
-const { exiftool } = require('exiftool-vendored')
-
-const isFileTagged = (file) => /-\[( *[a-zA-Z0-9]+,)* *[a-zA-Z0-9]+ *\]\.[a-zA-Z0-9]+$/.test(file)
-const getUntaggedFiles = (directory) => fs.readdirSync(directory).filter(file => !fs.statSync(`${directory}/${file}`).isDirectory() && !isFileTagged(file))
-const getUpToNumRandomElements = (arr, num) => {
-    if (arr.length < num) return arr
-    // TODO: Get num random elements from arr
+/** Main LifeTagger process */
+const main = async (mediaDir, batchSize, onlyExif) => {
+    const targetFiles = helpers.getUpToNumRandomElements(
+        helpers.filterFiles(
+            mediaDir,
+            (file) => /-\[( *[a-zA-Z0-9]+,)* *[a-zA-Z0-9]+ *\]\.[a-zA-Z0-9]+$/.test(file)
+        ), batchSize
+    )
+    if (targetFiles.length === 0) {
+        console.log(`All Done! No untagged files remain in '${mediaDir}'`)
+        return true
+    }
+    console.log(targetFiles)
 }
+
+require('./prepEnv').prepEnv()
+main(process.env['MEDIA_FOLDER_PATH'], process.env['BATCH_SIZE'], process.env['EXIF_TAGS_ONLY']).then((r) => {
+    console.log(`Done!${r ? '' : ' Come back tomorrow!'}`)
+    process.exit(0)
+}).catch((err) => {
+    console.error(err)
+    process.exit(1)
+})
