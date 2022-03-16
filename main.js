@@ -22,5 +22,13 @@ Possible future upgrades:
 // Before anything else, prepare the environment variables
 require('./prepEnv').prepEnv()
 
+const fs = require('fs')
 const open = require('open')
 const { exiftool } = require('exiftool-vendored')
+
+const isFileTagged = (file) => /-\[( *[a-zA-Z0-9]+,)* *[a-zA-Z0-9]+ *\]\.[a-zA-Z0-9]+$/.test(file)
+const getUntaggedFiles = (directory) => fs.readdirSync(directory).filter(file => !fs.statSync(`${directory}/${file}`).isDirectory() && !isFileTagged(file))
+const getUpToNumRandomElements = (arr, num) => {
+    if (arr.length < num) return arr
+    // TODO: Get num random elements from arr
+}
