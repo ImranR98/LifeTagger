@@ -7,5 +7,9 @@
     "start": "node main.js"
   },
   "author": "Imran Remtulla",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "dotenv": "^16.0.0",
+    "exiftool-vendored": "^16.0.0"
+  }
 }
