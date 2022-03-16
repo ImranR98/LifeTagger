@@ -1,7 +1,7 @@
 # LifeTagger [INCOMPLETE]
 > Add searchable tags to your vast media library, one batch at a time.
 
-Its the 2020s and over the years, you've ammassed a lifetime of photos and videos. Sounds great, but without a way to actually search through it all, your vast library of memories is about as useful as [Write-Only Memory](https://en.wikipedia.org/wiki/Write-only_memory_(joke)). You could, of course, rely on a service like Google Photos that uses machine-learning magic to tag items for you, but this method is far from perfect and - more importantly - relies on a shady for-profit company which produces non-portable results that will lock you in to their platform.
+It's the 2020s and over the years, you've ammassed a lifetime of photos and videos. Sounds great, but without a way to actually search through it all, your vast library of memories is about as useful as [Write-Only Memory](https://en.wikipedia.org/wiki/Write-only_memory_(joke)). You could, of course, rely on a service like Google Photos that uses machine-learning magic to tag items for you, but this method is far from perfect and - more importantly - relies on a shady for-profit company which produces non-portable results that will lock you in to their platform.
 
 No, the only solution is to quit your job, retreat to an isolated mountain, and spend the next few months combing through each file and tagging it manually. Or you could use LifeTagger.
 
