@@ -21,3 +21,6 @@ Possible future upgrades:
 
 // Before anything else, prepare the environment variables
 require('./prepEnv').prepEnv()
+
+const open = require('open')
+const { exiftool } = require('exiftool-vendored')

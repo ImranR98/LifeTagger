@@ -10,6 +10,7 @@
   "license": "ISC",
   "dependencies": {
     "dotenv": "^16.0.0",
-    "exiftool-vendored": "^16.0.0"
+    "exiftool-vendored": "^16.0.0",
+    "open": "^8.4.0"
   }
 }
