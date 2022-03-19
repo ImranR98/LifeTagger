@@ -1,46 +1,60 @@
-/*
-TODO:
-1. Grab array of all files in the directory, filter out already tagged ones (those that follow the -[tag1, tag2, tag3].ext format)
-2. From the remaining array, pick X number of files at random (forget the rest)
-3. For each remaining file...
-    1. Open the file in the appropriate default program (image viewer or media player) - not sure how to do this yet
-        - Especially see if it can be opened in an unfocused window to the side, so the terminal remains in focus (or open a preview inside the terminal?)
-    2. Check if a tags.txt exists in the directory and if so, show its contents (preferably in a new window while also keeping terminal in focus)
-    3. Ask the user to type in tags and make sure it is a comma separated string with letters and numbers only (also trim each tag and make it all lowercase)
-    4. Save the users validated tags by appending to the filename in the appropriate format and adding to the exiftool `Description` tag
-        - If the exiftool addition was not possible, warn the user (this is not an error, just an FYI as filename should be enough)
-    5. Update tags.txt with any new tags
+// Main LifeTagger CLI process
 
-Notes:
-1. Scanning the directory and filtering previously tagged files may be too slow to repeat on each run - may need to think about a solution
+const open = require('open')
+const helpers = require('./lib/helpers')
+const funcs = require('./lib/funcs')
 
-Possible future upgrades:
-1. A GUI to allow for built in file previews and tag autocomplete
-2. A server version of this that can be hosted by a user, then accessed any time from their phone or PC; also giving them daily notification reminders
-*/
-
-const helpers = require('./helpers')
-
-/** Main LifeTagger process */
-const main = async (mediaDir, batchSize, onlyExif) => {
-    const targetFiles = helpers.getUpToNumRandomElements(
-        helpers.filterFiles(
-            mediaDir,
-            (file) => /-\[( *[a-zA-Z0-9]+,)* *[a-zA-Z0-9]+ *\]\.[a-zA-Z0-9]+$/.test(file)
-        ), batchSize
-    )
+/** Main function */
+const main = async (mediaDir, batchSize) => {
+    const tagsFilePath = `${mediaDir}/tags.txt`
+    // Grab array of all files in the directory, filter out already tagged ones and pick X number of files at random
+    const { targetFiles, allTargetsCount } = funcs.getTargetFiles(mediaDir, batchSize)
     if (targetFiles.length === 0) {
         console.log(`All Done! No untagged files remain in '${mediaDir}'`)
-        return true
+        return
     }
-    console.log(targetFiles)
+    let skipped = 0
+    loop: for (let i = 0; i < targetFiles.length; i++) { // For each target file...
+        let targetFilePath = `${mediaDir}/${targetFiles[i]}`
+        const filePromise = open(targetFilePath, { wait: true }) // Open the file in the appropriate default program
+        console.log('Opened file: ' + targetFiles[i])
+        const prevUsedTags = helpers.readCommaSeparatedArrayFromFile(tagsFilePath)
+        console.log(`Previously used tags list: ${prevUsedTags}`) // Show previously used tags from a stored list file
+        const tags = await funcs.askForTags() // Ask the user to type in tags
+        if (tags === null) { // Skip this file if the user wants to
+            console.warn(`You have skipped '${targetFiles[i]}' this time`)
+            skipped++
+            continue loop
+        }
+        const description = await helpers.getInput('Enter a description (no periods, can be empty): ') || '' // Ask the user to type in a plain text description
+        console.log('Close the file to begin applying changes.')
+        await filePromise
+        console.log('Applying EXIF changes...')
+        try { // Use exiftool to update the file's description tag with the user's input
+            await funcs.tagFileEXIF(targetFilePath, tags, description)
+        } catch (err) { // If that failed, the user can skip this file or just ignore the error and go ahead with adding tags to the filename
+            console.error(err)
+            if (!await helpers.askYesNo('Above error was encountered. Do you still want to add the tags to filename?')) {
+                console.warn(`You have skipped '${targetFiles[i]}' this time`)
+                skipped++
+                continue loop
+            }
+        }
+        funcs.tagFileName(targetFilePath, tags) // Add the tag string to the filename
+        helpers.writeCommaSeparatedArrayToFile(tagsFilePath, helpers.mergeArrays(prevUsedTags, helpers.commaSeparatedStringToArray(tags))) // Update stored tag list
+    }
+    console.log(`Done for now!
+    Come back soon to continue tagging the ${allTargetsCount - batchSize + skipped} remaining files.`)
 }
 
 require('./prepEnv').prepEnv()
-main(process.env['MEDIA_FOLDER_PATH'], process.env['BATCH_SIZE'], process.env['EXIF_TAGS_ONLY']).then((r) => {
-    console.log(`Done!${r ? '' : ' Come back tomorrow!'}`)
-    process.exit(0)
-}).catch((err) => {
+main(process.env['MEDIA_FOLDER_PATH'], process.env['BATCH_SIZE']).catch((err) => {
     console.error(err)
     process.exit(1)
 })
+
+/*
+Possible future upgrades:
+1. A GUI to allow for built in file previews and tag autocomplete
+2. A server version that exposes an API to get targets and update them; extend the above GUI to act as the client (maybe add daily notification reminders)
+*/

@@ -43,7 +43,7 @@ module.exports.prepEnv = () => {
             parseFunc: this.strToPosInt
         },
         bools: {
-            vars: ['EXIF_TAGS_ONLY'],
+            vars: [],
             parseFunc: this.strToBool
         }
     }
