@@ -5,10 +5,10 @@ const helpers = require('./lib/helpers')
 const funcs = require('./lib/funcs')
 
 /** Main function */
-const main = async (mediaDir, batchSize) => {
+const main = async (mediaDir, batchSize, excludeExtensions) => {
     const tagsFilePath = `${mediaDir}/tags.txt`
     // Grab array of all files in the directory, filter out already tagged ones and pick X number of files at random
-    const { targetFiles, allTargetsCount } = funcs.getTargetFiles(mediaDir, batchSize)
+    const { targetFiles, allTargetsCount } = funcs.getTargetFiles(mediaDir, batchSize, excludeExtensions)
     if (targetFiles.length === 0) {
         console.log(`All Done! No untagged files remain in '${mediaDir}'`)
         return
@@ -47,8 +47,8 @@ const main = async (mediaDir, batchSize) => {
     Come back soon to continue tagging the ${allTargetsCount - batchSize + skipped} remaining files.`)
 }
 
-require('./prepEnv').prepEnv()
-main(process.env['MEDIA_FOLDER_PATH'], process.env['BATCH_SIZE']).catch((err) => {
+require('./lib/prepEnv').prepEnv()
+main(process.env['MEDIA_FOLDER_PATH'], process.env['BATCH_SIZE'], process.env['EXCLUDE_EXT']).catch((err) => {
     console.error(err)
     process.exit(1)
 })
