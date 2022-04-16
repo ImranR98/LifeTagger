@@ -15,6 +15,7 @@ const main = async (mediaDir, batchSize, excludeExtensions) => {
     }
     let skipped = 0
     loop: for (let i = 0; i < targetFiles.length; i++) { // For each target file...
+        console.log('\n\n')
         let targetFilePath = `${mediaDir}/${targetFiles[i]}`
         const filePromise = open(targetFilePath, { wait: true }) // Open the file in the appropriate default program
         console.log('Opened file: ' + targetFiles[i])
@@ -43,7 +44,7 @@ const main = async (mediaDir, batchSize, excludeExtensions) => {
         funcs.tagFileName(targetFilePath, tags) // Add the tag string to the filename
         helpers.writeCommaSeparatedArrayToFile(tagsFilePath, helpers.mergeArrays(prevUsedTags, helpers.commaSeparatedStringToArray(tags))) // Update stored tag list
     }
-    console.log(`Done for now!
+    console.log(`\n\nDone for now!
     Come back soon to continue tagging the ${allTargetsCount - batchSize + skipped} remaining files.`)
 }
 
