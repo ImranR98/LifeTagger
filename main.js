@@ -19,7 +19,7 @@ const main = async (mediaDir, batchSize, excludeExtensions) => {
         let targetFilePath = `${mediaDir}/${targetFiles[i]}`
         const filePromise = open(targetFilePath, { wait: true }) // Open the file in the appropriate default program
         console.log('Opened file: ' + targetFiles[i])
-        const prevUsedTags = funcs.getPrevUsedTags(mediaDir)
+        const prevUsedTags = funcs.getPrevUsedTags(mediaDir, excludeExtensions)
         console.log(`Previously used tags list: ${prevUsedTags.join(', ')}`) // Show previously used tags from a stored list file
         const tags = await funcs.askForTags() // Ask the user to type in tags
         if (tags === null) { // Skip this file if the user wants to

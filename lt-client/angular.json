@@ -75,7 +75,8 @@
               "browserTarget": "lt-client:build:production"
             },
             "development": {
-              "browserTarget": "lt-client:build:development"
+              "browserTarget": "lt-client:build:development",
+              "proxyConfig": "proxy.conf.json"
             }
           },
           "defaultConfiguration": "development"

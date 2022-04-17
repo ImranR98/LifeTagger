@@ -1,0 +1,12 @@
+<p *ngIf="loading">Loading...</p>
+<p *ngIf="!loading && files.length === 0">No Files!</p>
+<table *ngIf="files.length > 0">
+    <tr>
+        <th>File</th>
+        <th>Tags</th>
+    </tr>
+    <tr *ngFor="let file of files">
+        <td><a [routerLink]="'/file/' + file.file">{{file.file}}</a></td>
+        <td>{{tagString(file.existingTags)}}</td>
+    </tr>
+</table>

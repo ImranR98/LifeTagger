@@ -1,0 +1,6 @@
+<p *ngIf="!file">Loading...</p>
+<div *ngIf="file">
+    <h3>{{file.file}}</h3>
+    <pre>Tags: {{file.existingTags | json}}</pre>
+    <img [src]="'/api/file/' + file.file + '/content'" style="max-height: 100vh; max-width: 100vw;">
+</div>
