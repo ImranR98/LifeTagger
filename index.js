@@ -9,7 +9,7 @@ app.use(express.json())
 
 app.get('/files', async (req, res) => {
     try {
-        res.send(funcs.getFileList(process.env['MEDIA_FOLDER_PATH'], process.env['EXCLUDE_EXT']))
+        res.send(await funcs.getFileList(process.env['MEDIA_FOLDER_PATH'], process.env['EXCLUDE_EXT']))
     } catch (err) {
         console.error(err)
         res.status(500).send(err)
@@ -27,7 +27,7 @@ app.get('/file/:name/content', async (req, res) => {
 
 app.get('/file/:name', async (req, res) => {
     try {
-        res.send(funcs.getFileInfo(process.env['MEDIA_FOLDER_PATH'], req.params.name))
+        res.send(await funcs.getFileInfo(process.env['MEDIA_FOLDER_PATH'], req.params.name))
     } catch (err) {
         console.error(err)
         res.status(500).send(err)
@@ -47,7 +47,7 @@ app.post('/file/:name', async (req, res) => {
 
 app.get('/tags', async (req, res) => {
     try {
-        res.send(funcs.getPrevUsedTags(process.env['MEDIA_FOLDER_PATH']))
+        res.send(await funcs.getPrevUsedTags(process.env['MEDIA_FOLDER_PATH']))
     } catch (err) {
         console.error(err)
         res.status(500).send(err)
