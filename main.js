@@ -19,8 +19,8 @@ const main = async (mediaDir, batchSize, excludeExtensions) => {
         let targetFilePath = `${mediaDir}/${targetFiles[i]}`
         const filePromise = open(targetFilePath, { wait: true }) // Open the file in the appropriate default program
         console.log('Opened file: ' + targetFiles[i])
-        const prevUsedTags = helpers.readCommaSeparatedArrayFromFile(tagsFilePath)
-        console.log(`Previously used tags list: ${prevUsedTags}`) // Show previously used tags from a stored list file
+        const prevUsedTags = funcs.getPrevUsedTags(mediaDir)
+        console.log(`Previously used tags list: ${prevUsedTags.join(', ')}`) // Show previously used tags from a stored list file
         const tags = await funcs.askForTags() // Ask the user to type in tags
         if (tags === null) { // Skip this file if the user wants to
             console.warn(`You have skipped '${targetFiles[i]}' this time`)
@@ -42,7 +42,6 @@ const main = async (mediaDir, batchSize, excludeExtensions) => {
             }
         }
         funcs.tagFileName(targetFilePath, tags) // Add the tag string to the filename
-        helpers.writeCommaSeparatedArrayToFile(tagsFilePath, helpers.mergeArrays(prevUsedTags, helpers.commaSeparatedStringToArray(tags))) // Update stored tag list
     }
     console.log(`\n\nDone for now!
     Come back soon to continue tagging the ${allTargetsCount - batchSize + skipped} remaining files.`)
