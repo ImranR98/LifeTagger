@@ -11,8 +11,11 @@ LifeTagger breaks the task out into manageable chunks. Point it to your media fo
 0. Install [Node.js](https://nodejs.org/en/) on your PC.
 1. Copy the `template.env` file and rename the copy to `app.env`.
 2. Fill `app.env` in with appropriate information as described in that file (replace the descriptions after the `=` with your actual info).
-3. Run the script by running `npm start` in a terminal (opened in the LifeTagger folder).
-4. Repeat step 3 at least once per day - set a reminder on your phone, a sticky note on your fridge, or hire someone to remind you by knocking on your window every morning idk.
+3. Build the client by running `npm run build` in a terminal (opened in the LifeTagger folder).
+4. Start the server by running `npm start`.
+5. Launch your browser and open `http://localhost:8080` and tag a few files, one at a time.
+6. Stop the server by pressing `Ctrl-C` in the terminal.
+6. Repeat steps 4-6 at least once per day - set a reminder on your phone, a sticky note on your fridge, or hire someone to remind you by knocking on your window every morning idk.
 
 ## More Details
 - Tags are appended to the file name in the following format: `filename-[tag1, tag2, tag3].jpeg`.
