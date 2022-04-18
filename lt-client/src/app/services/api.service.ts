@@ -14,10 +14,10 @@ export class ApiService {
   }
 
   getFileInfo(file: string) {
-    return firstValueFrom(this.http.get(`/api/file/${file}`)) as Promise<{ file: string, existingTags: string[] }>
+    return firstValueFrom(this.http.get(`/api/file/${file}`)) as Promise<{ file: string, existingTags: string[], description: string }>
   }
 
-  async updateFileInfo(file: string, tags: [], description: string) {
+  async updateFileInfo(file: string, tags: string[], description: string) {
     await firstValueFrom(this.http.post(`/api/file/${file}`, { tags, description }))
   }
 

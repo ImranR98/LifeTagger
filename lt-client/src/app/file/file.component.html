@@ -1,6 +1,26 @@
-<p *ngIf="!file">Loading...</p>
 <div *ngIf="file">
     <h3>{{file.file}}</h3>
-    <pre>Tags: {{file.existingTags | json}}</pre>
-    <img [src]="'/api/file/' + file.file + '/content'" style="max-height: 100vh; max-width: 100vw;">
+    <p (click)="toggleIsVid()">Content (click here to toggle between image/video viewer):</p>
+    <img *ngIf="!isVid" [src]="'/api/file/' + file.file + '/content'" style="max-height: 100vh; max-width: 100vw;">
+    <video *ngIf="isVid" [src]="'/api/file/' + file.file + '/content'" style="max-height: 100vh; max-width: 100vw;" controls></video>
+    <p>Tags (click to remove):</p>
+    <p style="font-family: monospace;">
+        <span *ngFor="let tag of file.existingTags" (click)="removeTag(tag)">{{tag}}, </span>
+    </p>
+    <form (submit)="addTag($event)">
+        <input type="text" placeholder="Add Tag" aria-label="Tag" matInput [formControl]="tag" [matAutocomplete]="auto">
+        <mat-autocomplete #auto="matAutocomplete">
+            <mat-option *ngFor="let option of filteredTags | async" [value]="option">
+                {{option}}
+            </mat-option>
+        </mat-autocomplete>
+        <button type="submit" [disabled]="!tag.value">Add</button>
+    </form>
+    <p>Description (cannot remove, only prepend - though existing tags are changed):</p>
+    <p style="font-family: monospace;">{{file.description}}</p>
+    <form (submit)="submit($event)">
+        <input [formControl]="descriptionAppend" placeholder="Append to description">
+        <p></p>
+        <button type="submit">Update File</button>
+    </form>
 </div>

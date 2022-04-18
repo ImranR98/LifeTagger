@@ -4,7 +4,8 @@
   "description": "Add searchable tags to your vast media library, one batch at a time.",
   "main": "main.js",
   "scripts": {
-    "start": "node main.js"
+    "build": "npm run build --prefix ./lt-client",
+    "start": "node index.js"
   },
   "author": "Imran Remtulla",
   "license": "ISC",

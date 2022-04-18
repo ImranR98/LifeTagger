@@ -1,9 +1,13 @@
 const prepEnv = require('./lib/prepEnv')
 const funcs = require('./lib/funcs')
 const express = require('express')
+const path = require('path')
 
 const app = express()
+const clientDir = path.resolve('./lt-client/dist/lt-client')
+
 app.use(express.json())
+app.use(express.static(clientDir))
 
 app.get('/api/files', async (req, res) => {
     try {
@@ -54,6 +58,10 @@ app.get('/api/tags', async (req, res) => {
 
 app.all('/api/*', (req, res) => {
     res.status(404).send()
+})
+
+app.get('*', (req, res) => {
+    res.sendFile(`${clientDir}/index.html`)
 })
 
 async function main() {
