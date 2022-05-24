@@ -4,7 +4,7 @@ const express = require('express')
 const path = require('path')
 
 const app = express()
-const clientDir = path.resolve('./lt-client/dist/lt-client')
+const clientDir = path.resolve(__dirname + '/lt-client/dist/lt-client')
 
 app.use(express.json())
 app.use(express.static(clientDir))
