@@ -5,7 +5,7 @@ It's the 2020s and over the years, you've ammassed a lifetime of photos and vide
 
 No, the only solution is to quit your job, retreat to an isolated mountain, and spend the next few months combing through each file and tagging it manually. Or you could use LifeTagger.
 
-LifeTagger breaks the task out into manageable chunks. Point it to your media folder and it will pick a small batch of files and present them to you; all you need to do is type in the appropriate tags (or pick from a list of previously used ones) and LifeTagger will write those to the file name and the EXIF 'Description' field (a plain text description can also be added to the EXIF data). The idea is to turn this into a daily habit that, while only taking up a minute of your time a day, will - in a few years - result in a media library that will be fully searchable for life - no matter what storage medium or cloud platform you save them to.
+LifeTagger breaks the task out into manageable chunks. Point it to your media folder and it will present a list of all media files in a Web-based GUI; all you need to do is type in the appropriate tags (or pick from a list of previously used ones) and LifeTagger will write those to the file name and the EXIF 'Description' field (a plain text description can also be added to the EXIF data). The idea is to do this a few files at a time and turn this into a daily habit that, while only taking up a minute of your time a day, will - in a few years - result in a media library that will be fully searchable for life - no matter what storage medium or cloud platform you save them to.
 
 ## Setup
 0. Install [Node.js](https://nodejs.org/en/) on your PC.
