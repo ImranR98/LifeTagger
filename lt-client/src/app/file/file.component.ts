@@ -1,7 +1,6 @@
 import { Component, OnInit } from '@angular/core';
-import { FormControl, FormGroup } from '@angular/forms';
+import { FormControl } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
-import * as e from 'express';
 import { map, Observable, startWith } from 'rxjs';
 import { ApiService } from '../services/api.service';
 
@@ -77,7 +76,7 @@ export class FileComponent implements OnInit {
 
   async submit(e: Event) {
     e.preventDefault()
-    if (this.file) {
+    if (this.file && this.file.existingTags.length > 0) {
       try {
         await this.apiService.updateFileInfo(this.file.file,
           this.file.existingTags,
@@ -87,6 +86,8 @@ export class FileComponent implements OnInit {
       } catch (err) {
         console.error(err)
       }
+    } else if (this.file && this.file.existingTags.length == 0) {
+      alert('Must set at least one tag!')
     }
   }
 
