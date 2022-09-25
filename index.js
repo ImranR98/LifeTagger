@@ -9,9 +9,12 @@ const clientDir = path.resolve(__dirname + '/lt-client/dist/lt-client')
 app.use(express.json())
 app.use(express.static(clientDir))
 
+const targetFolderPath = process.argv[2] || process.env['MEDIA_FOLDER_PATH']
+const excludeCSV = process.argv[3] || process.env['EXCLUDE_EXT']
+
 app.get('/api/files', async (req, res) => {
     try {
-        res.send(await funcs.getFileList(process.env['MEDIA_FOLDER_PATH'], process.env['EXCLUDE_EXT']))
+        res.send(await funcs.getFileList(targetFolderPath, excludeCSV))
     } catch (err) {
         console.error(err)
         res.status(500).send(err)
@@ -20,7 +23,7 @@ app.get('/api/files', async (req, res) => {
 
 app.get('/api/file/:name/content', async (req, res) => {
     try {
-        res.sendFile(`${process.env['MEDIA_FOLDER_PATH']}/${req.params.name}`)
+        res.sendFile(`${targetFolderPath}/${req.params.name}`)
     } catch (err) {
         console.error(err)
         res.status(500).send(err)
@@ -29,7 +32,7 @@ app.get('/api/file/:name/content', async (req, res) => {
 
 app.get('/api/file/:name', async (req, res) => {
     try {
-        res.send(await funcs.getFileInfo(process.env['MEDIA_FOLDER_PATH'], req.params.name))
+        res.send(await funcs.getFileInfo(targetFolderPath, req.params.name))
     } catch (err) {
         console.error(err)
         res.status(500).send(err)
@@ -38,8 +41,8 @@ app.get('/api/file/:name', async (req, res) => {
 
 app.post('/api/file/:name', async (req, res) => {
     try {
-        await funcs.tagFileEXIF(`${process.env['MEDIA_FOLDER_PATH']}/${req.params.name}`, req.body.tags.join(', '), req.body.description || '')
-        await funcs.tagFileName(`${process.env['MEDIA_FOLDER_PATH']}/${req.params.name}`, req.body.tags.join(', '))
+        await funcs.tagFileEXIF(`${targetFolderPath}/${req.params.name}`, req.body.tags.join(', '), req.body.description || '')
+        await funcs.tagFileName(`${targetFolderPath}/${req.params.name}`, req.body.tags.join(', '))
         res.send()
     } catch (err) {
         console.error(err)
@@ -49,7 +52,7 @@ app.post('/api/file/:name', async (req, res) => {
 
 app.get('/api/tags', async (req, res) => {
     try {
-        res.send(await funcs.getPrevUsedTags(process.env['MEDIA_FOLDER_PATH'], process.env['EXCLUDE_EXT']))
+        res.send(await funcs.getPrevUsedTags(targetFolderPath, excludeCSV))
     } catch (err) {
         console.error(err)
         res.status(500).send(err)
