@@ -23,91 +23,33 @@ import {
 } from "./db";
 import { absolutePathFor } from "./media";
 import { writeMetadata } from "./metadata";
+import { indexState } from "./indexer";
+import { beginTask, finishTask, getTask, updateTask } from "./tasks";
+
+const SCAN_CHUNK = 500;
 
 export const migrationState: MigrationState & {
-  processed: number;
-  total: number;
   startedAt: string | null;
   finishedAt: string | null;
-  lastError: string | null;
 } = {
   scanned: false,
+  needsScan: false,
   legacyFiles: 0,
   legacyTags: 0,
   appliedFiles: 0,
   pendingFiles: 0,
   running: false,
+  mode: null,
   errors: 0,
   processed: 0,
   total: 0,
+  lastError: null,
   startedAt: null,
   finishedAt: null,
-  lastError: null,
 };
 
-export function scanMigration(): MigrationState {
-  const root = getMediaRoot();
-  if (!root || !fs.existsSync(root))
-    throw new Error("Media root is not configured");
-  const files = db.prepare("SELECT id, name, description FROM files").all() as {
-    id: number;
-    name: string;
-    description: string | null;
-  }[];
-  const collected = new Map<
-    string,
-    { count: number; sources: Set<string>; samples: Set<string> }
-  >();
-  let legacyFiles = 0;
-  transaction(() => {
-    db.prepare("DELETE FROM legacy_tags").run();
-    for (const file of files) {
-      const filename = parseLegacyFilename(file.name);
-      const description = splitLegacyDescription(file.description ?? "", {
-        allowSingle: Boolean(filename),
-        filenameTags: filename?.tags,
-      });
-      const tags = [...(filename?.tags ?? []), ...description.tags];
-      const sources = new Set<string>();
-      if (filename) sources.add("filename");
-      if (description.tags.length > 0) sources.add("description");
-      const pending = tags.length > 0;
-      db.prepare("UPDATE files SET legacy_pending = ? WHERE id = ?").run(
-        pending ? 1 : 0,
-        file.id,
-      );
-      if (!pending) continue;
-      legacyFiles++;
-      for (const tag of tags) {
-        const entry = collected.get(tag) ?? {
-          count: 0,
-          sources: new Set<string>(),
-          samples: new Set<string>(),
-        };
-        entry.count++;
-        for (const source of sources) entry.sources.add(source);
-        if (entry.samples.size < 5) entry.samples.add(String(file.id));
-        collected.set(tag, entry);
-      }
-    }
-    for (const [value, entry] of collected) {
-      db.prepare(
-        "INSERT INTO legacy_tags(legacy_value, count, sources, samples) VALUES(?, ?, ?, ?)",
-      ).run(
-        value,
-        entry.count,
-        JSON.stringify(Array.from(entry.sources)),
-        JSON.stringify(Array.from(entry.samples)),
-      );
-    }
-  });
-  setSetting("migrationScanned", "true");
-  migrationState.scanned = true;
-  migrationState.legacyFiles = legacyFiles;
-  migrationState.legacyTags = collected.size;
-  migrationState.pendingFiles = legacyFiles;
-  refreshMigrationCounters();
-  return getMigrationState();
+function scanError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function refreshMigrationCounters(): void {
@@ -122,21 +64,198 @@ export function refreshMigrationCounters(): void {
   migrationState.legacyFiles = pending.count;
   migrationState.scanned =
     getSetting("migrationScanned") === "true" || pending.count > 0;
+  migrationState.needsScan = getSetting("migrationNeedsScan") === "true";
 }
 
 export function getMigrationState(): MigrationState {
   refreshMigrationCounters();
   return {
     scanned: migrationState.scanned,
+    needsScan: migrationState.needsScan,
     legacyFiles: migrationState.legacyFiles,
     legacyTags: migrationState.legacyTags,
     appliedFiles: migrationState.appliedFiles,
     pendingFiles: migrationState.pendingFiles,
     running: migrationState.running,
+    mode: migrationState.mode,
     errors: migrationState.errors,
     processed: migrationState.processed,
     total: migrationState.total,
+    lastError: migrationState.lastError,
   };
+}
+
+/**
+ * Rebuild the legacy-tag inventory from the current file index. The work is
+ * chunked so health probes and normal API requests keep running.
+ */
+async function runMigrationScan(): Promise<void> {
+  const root = getMediaRoot();
+  if (!root || !fs.existsSync(root))
+    throw new Error("Media root is not configured");
+
+  if (!beginTask("migration-scan", 0, "Scanning for legacy tags"))
+    throw new Error("Another task is already running");
+
+  migrationState.running = true;
+  migrationState.mode = "scan";
+  migrationState.startedAt = new Date().toISOString();
+  migrationState.finishedAt = null;
+  migrationState.processed = 0;
+  migrationState.total = 0;
+  migrationState.errors = 0;
+  migrationState.lastError = null;
+
+  try {
+    const files = db
+      .prepare("SELECT id, name, description FROM files")
+      .all() as {
+      id: number;
+      name: string;
+      description: string | null;
+    }[];
+    migrationState.total = files.length;
+    updateTask({ total: files.length, processed: 0 });
+
+    const collected = new Map<
+      string,
+      { count: number; sources: Set<string>; samples: Set<string> }
+    >();
+    let legacyFiles = 0;
+    const setPending = db.prepare(
+      "UPDATE files SET legacy_pending = ? WHERE id = ?",
+    );
+
+    for (let start = 0; start < files.length; start += SCAN_CHUNK) {
+      const end = Math.min(files.length, start + SCAN_CHUNK);
+      transaction(() => {
+        for (let index = start; index < end; index++) {
+          const file = files[index];
+          if (!file) continue;
+          const filename = parseLegacyFilename(file.name);
+          const description = splitLegacyDescription(file.description ?? "", {
+            allowSingle: Boolean(filename),
+            filenameTags: filename?.tags,
+          });
+          const tags = [...(filename?.tags ?? []), ...description.tags];
+          const sources = new Set<string>();
+          if (filename) sources.add("filename");
+          if (description.tags.length > 0) sources.add("description");
+          const pending = tags.length > 0;
+          setPending.run(pending ? 1 : 0, file.id);
+          if (!pending) continue;
+          legacyFiles++;
+          for (const tag of tags) {
+            const entry = collected.get(tag) ?? {
+              count: 0,
+              sources: new Set<string>(),
+              samples: new Set<string>(),
+            };
+            entry.count++;
+            for (const source of sources) entry.sources.add(source);
+            if (entry.samples.size < 5) entry.samples.add(String(file.id));
+            collected.set(tag, entry);
+          }
+        }
+      });
+      migrationState.processed = end;
+      updateTask({ processed: end });
+      if (end < files.length)
+        await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    transaction(() => {
+      db.prepare("DELETE FROM legacy_tags").run();
+      const insert = db.prepare(
+        "INSERT INTO legacy_tags(legacy_value, count, sources, samples) VALUES(?, ?, ?, ?)",
+      );
+      for (const [value, entry] of collected) {
+        insert.run(
+          value,
+          entry.count,
+          JSON.stringify(Array.from(entry.sources)),
+          JSON.stringify(Array.from(entry.samples)),
+        );
+      }
+    });
+
+    setSetting("migrationScanned", "true");
+    setSetting("migrationNeedsScan", "false");
+    migrationState.scanned = true;
+    migrationState.legacyFiles = legacyFiles;
+    migrationState.legacyTags = collected.size;
+    migrationState.pendingFiles = legacyFiles;
+    finishTask(0, `Scan complete: ${legacyFiles} legacy files`);
+    serverLog.info(
+      "migration scan complete",
+      legacyFiles,
+      "legacy files",
+      collected.size,
+      "unique strings",
+    );
+  } catch (error) {
+    migrationState.errors = 1;
+    migrationState.lastError = scanError(error);
+    updateTask({ errors: 1 });
+    finishTask(1, `Scan failed: ${migrationState.lastError}`);
+    throw error;
+  } finally {
+    migrationState.running = false;
+    migrationState.mode = null;
+    migrationState.finishedAt = new Date().toISOString();
+    refreshMigrationCounters();
+  }
+}
+
+let scanPromise: Promise<void> | null = null;
+
+export function startMigrationScan(): {
+  started: boolean;
+  state: MigrationState;
+  reason?: string;
+} {
+  if (scanPromise || migrationState.running) {
+    return {
+      started: false,
+      state: getMigrationState(),
+      reason: "Another task is already running",
+    };
+  }
+  if (getTask()?.running) {
+    return {
+      started: false,
+      state: getMigrationState(),
+      reason: "Another task is already running",
+    };
+  }
+  if (indexState.running) {
+    return {
+      started: false,
+      state: getMigrationState(),
+      reason: "Wait for the library index to finish",
+    };
+  }
+  const root = getMediaRoot();
+  if (!root || !fs.existsSync(root)) {
+    return {
+      started: false,
+      state: getMigrationState(),
+      reason: "The media folder is not available",
+    };
+  }
+  scanPromise = runMigrationScan()
+    .catch((error) => serverLog.error("migration scan failed", error))
+    .finally(() => {
+      scanPromise = null;
+    });
+  return { started: true, state: getMigrationState() };
+}
+
+/** CLI-friendly wrapper that waits for the background scan to finish. */
+export async function scanMigration(): Promise<MigrationState> {
+  const result = startMigrationScan();
+  if (result.started && scanPromise) await scanPromise;
+  return getMigrationState();
 }
 
 export function getMigrationRows(): MigrationTagRow[] {
@@ -233,11 +352,42 @@ let applyPromise: Promise<void> | null = null;
 export function applyMigration(options: { stripFilenames: boolean }): {
   started: boolean;
   state: MigrationState;
+  reason?: string;
 } {
-  if (applyPromise) return { started: false, state: getMigrationState() };
-  applyPromise = runMigrationApply(options).finally(() => {
-    applyPromise = null;
-  });
+  if (applyPromise || scanPromise || migrationState.running) {
+    return {
+      started: false,
+      state: getMigrationState(),
+      reason: "Another task is already running",
+    };
+  }
+  if (getTask()?.running) {
+    return {
+      started: false,
+      state: getMigrationState(),
+      reason: "Another task is already running",
+    };
+  }
+  if (indexState.running) {
+    return {
+      started: false,
+      state: getMigrationState(),
+      reason: "Wait for the library index to finish",
+    };
+  }
+  const root = getMediaRoot();
+  if (!root || !fs.existsSync(root)) {
+    return {
+      started: false,
+      state: getMigrationState(),
+      reason: "The media folder is not available",
+    };
+  }
+  applyPromise = runMigrationApply(options)
+    .catch((error) => serverLog.error("migration apply failed", error))
+    .finally(() => {
+      applyPromise = null;
+    });
   return { started: true, state: getMigrationState() };
 }
 
@@ -246,8 +396,12 @@ async function runMigrationApply(options: {
 }): Promise<void> {
   const root = getMediaRoot();
   if (!root) throw new Error("Media root is not configured");
+  if (!beginTask("migration-apply", 0, "Applying migration"))
+    throw new Error("Another task is already running");
+
   const rows = fileRowsWithLegacy();
   migrationState.running = true;
+  migrationState.mode = "apply";
   migrationState.startedAt = new Date().toISOString();
   migrationState.finishedAt = null;
   migrationState.processed = 0;
@@ -255,108 +409,140 @@ async function runMigrationApply(options: {
   migrationState.errors = 0;
   migrationState.appliedFiles = 0;
   migrationState.lastError = null;
+  updateTask({ total: rows.length, processed: 0, errors: 0 });
   serverLog.info("migration started", rows.length, "files");
 
-  for (const row of rows) {
-    migrationState.processed++;
-    try {
-      const filename = parseLegacyFilename(row.name);
-      const descriptionParts = splitLegacyDescription(row.description ?? "", {
-        allowSingle: Boolean(filename),
-        filenameTags: filename?.tags,
-      });
-      const legacy = Array.from(
-        new Set([...(filename?.tags ?? []), ...descriptionParts.tags]),
-      );
-      const mapped = mappedTags(legacy);
-      if (!mapped.complete) {
-        throw new Error(`unmapped legacy tag on ${row.path}`);
-      }
-      const absolute = absolutePathFor(row);
-      if (!absolute) throw new Error("invalid path");
-      const existingTags = tagsForFile(row.id);
-      const nextTags = dedupeTags([...existingTags, ...mapped.tags]);
-      const nextDescription =
-        descriptionParts.tags.length > 0
-          ? descriptionParts.description
-          : (row.description ?? "");
-      const written = await writeMetadata({
-        relativePath: row.path,
-        absolutePath: absolute,
-        tags: nextTags,
-        description: nextDescription,
-      });
-      if (!written.metadataWritable) throw new Error("metadata write failed");
+  try {
+    for (const row of rows) {
+      try {
+        const filename = parseLegacyFilename(row.name);
+        const descriptionParts = splitLegacyDescription(row.description ?? "", {
+          allowSingle: Boolean(filename),
+          filenameTags: filename?.tags,
+        });
+        const legacy = Array.from(
+          new Set([...(filename?.tags ?? []), ...descriptionParts.tags]),
+        );
+        const mapped = mappedTags(legacy);
+        if (!mapped.complete) {
+          throw new Error(`unmapped legacy tag on ${row.path}`);
+        }
+        const absolute = absolutePathFor(row);
+        if (!absolute) throw new Error("invalid path");
+        const existingTags = tagsForFile(row.id);
+        const nextTags = dedupeTags([...existingTags, ...mapped.tags]);
+        const nextDescription =
+          descriptionParts.tags.length > 0
+            ? descriptionParts.description
+            : (row.description ?? "");
+        const written = await writeMetadata({
+          relativePath: row.path,
+          absolutePath: absolute,
+          tags: nextTags,
+          description: nextDescription,
+        });
+        if (!written.metadataWritable) throw new Error("metadata write failed");
 
-      let newRelative = row.path;
-      let newName = row.name;
-      if (options.stripFilenames && filename) {
-        const targetRelative = path.posix.join(
-          path.posix.dirname(row.path) === "."
-            ? ""
-            : path.posix.dirname(row.path),
-          filename.newName,
-        );
-        const targetAbsolute = path.resolve(root, targetRelative);
-        if (targetAbsolute !== absolute && fs.existsSync(targetAbsolute)) {
-          throw new Error(
-            `cannot strip filename, target exists: ${targetRelative}`,
+        let newRelative = row.path;
+        let newName = row.name;
+        if (options.stripFilenames && filename) {
+          const targetRelative = path.posix.join(
+            path.posix.dirname(row.path) === "."
+              ? ""
+              : path.posix.dirname(row.path),
+            filename.newName,
           );
+          const targetAbsolute = path.resolve(root, targetRelative);
+          if (targetAbsolute !== absolute && fs.existsSync(targetAbsolute)) {
+            throw new Error(
+              `cannot strip filename, target exists: ${targetRelative}`,
+            );
+          }
+          if (targetAbsolute !== absolute) {
+            await fs.promises.rename(absolute, targetAbsolute);
+            await fs.promises
+              .appendFile(
+                path.join(config.migrationDir, "renames.jsonl"),
+                JSON.stringify({
+                  fileId: row.id,
+                  from: row.path,
+                  to: targetRelative,
+                  at: new Date().toISOString(),
+                }) + "\n",
+              )
+              .catch(() => undefined);
+            newRelative = targetRelative;
+            newName = filename.newName;
+          }
         }
-        if (targetAbsolute !== absolute) {
-          await fs.promises.rename(absolute, targetAbsolute);
-          await fs.promises
-            .appendFile(
-              path.join(config.migrationDir, "renames.jsonl"),
-              JSON.stringify({
-                fileId: row.id,
-                from: row.path,
-                to: targetRelative,
-                at: new Date().toISOString(),
-              }) + "\n",
-            )
-            .catch(() => undefined);
-          newRelative = targetRelative;
-          newName = filename.newName;
-        }
+        const stat = await fs.promises.stat(path.resolve(root, newRelative));
+        updateFileAfterWrite(row.id, {
+          description: nextDescription,
+          tags: nextTags,
+          metadataWritable: true,
+          mtimeMs: Math.floor(stat.mtimeMs),
+          size: stat.size,
+          captureAt: written.captureAt ?? row.capture_at,
+          localDate: written.localDate ?? row.local_date,
+          legacyPending: false,
+        });
+        if (newRelative !== row.path)
+          updateFilePath(
+            row.id,
+            newRelative,
+            newName,
+            stat.size,
+            Math.floor(stat.mtimeMs),
+          );
+        migrationState.appliedFiles++;
+      } catch (error) {
+        migrationState.errors++;
+        migrationState.lastError = scanError(error);
+        serverLog.warn("migration file failed", row.path, error);
       }
-      const stat = await fs.promises.stat(path.resolve(root, newRelative));
-      updateFileAfterWrite(row.id, {
-        description: nextDescription,
-        tags: nextTags,
-        metadataWritable: true,
-        mtimeMs: Math.floor(stat.mtimeMs),
-        size: stat.size,
-        captureAt: written.captureAt ?? row.capture_at,
-        localDate: written.localDate ?? row.local_date,
-        legacyPending: false,
+      migrationState.processed++;
+      updateTask({
+        processed: migrationState.processed,
+        errors: migrationState.errors,
       });
-      if (newRelative !== row.path)
-        updateFilePath(
-          row.id,
-          newRelative,
-          newName,
-          stat.size,
-          Math.floor(stat.mtimeMs),
-        );
-      migrationState.appliedFiles++;
-    } catch (error) {
-      migrationState.errors++;
-      migrationState.lastError =
-        error instanceof Error ? error.message : String(error);
-      serverLog.warn("migration file failed", row.path, error);
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
+
+    refreshMigrationCounters();
+    if (migrationState.pendingFiles === 0) {
+      db.prepare("DELETE FROM legacy_tags").run();
+      setSetting("migrationNeedsScan", "false");
+      refreshMigrationCounters();
+    } else {
+      setSetting("migrationNeedsScan", "true");
+      migrationState.needsScan = true;
+    }
+    finishTask(
+      migrationState.errors,
+      `Migration complete: ${migrationState.appliedFiles} applied, ${migrationState.errors} errors`,
+    );
+  } catch (error) {
+    migrationState.errors++;
+    migrationState.lastError = scanError(error);
+    updateTask({ errors: migrationState.errors });
+    finishTask(
+      migrationState.errors,
+      `Migration failed: ${migrationState.lastError}`,
+    );
+    throw error;
+  } finally {
+    migrationState.running = false;
+    migrationState.mode = null;
+    migrationState.finishedAt = new Date().toISOString();
+    refreshMigrationCounters();
+    serverLog.info(
+      "migration complete",
+      migrationState.appliedFiles,
+      "applied",
+      migrationState.errors,
+      "errors",
+    );
   }
-  migrationState.running = false;
-  migrationState.finishedAt = new Date().toISOString();
-  refreshMigrationCounters();
-  serverLog.info(
-    "migration complete",
-    migrationState.appliedFiles,
-    "applied",
-    migrationState.errors,
-    "errors",
-  );
 }
 
 export function migrationReportPath(): string {

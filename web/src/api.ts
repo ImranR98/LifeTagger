@@ -41,19 +41,39 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new NetworkError();
   }
-  const contentType = response.headers.get("content-type") ?? "";
   if (
     response.type === "opaqueredirect" ||
     response.status === 401 ||
     response.status === 403 ||
-    response.redirected ||
-    !contentType.includes("application/json")
+    response.redirected
   ) {
     throw new AuthRequiredError();
   }
-  const data = (await response.json()) as T & { error?: string };
-  if (!response.ok)
-    throw new Error(data.error || `Request failed (${response.status})`);
+
+  const text = await response.text();
+  let data: (T & { error?: string; reason?: string }) | null = null;
+  if (text) {
+    try {
+      data = JSON.parse(text) as T & { error?: string; reason?: string };
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!response.ok) {
+    if (data && typeof data.error === "string" && data.error.trim())
+      throw new Error(data.error);
+    if (data && typeof data.reason === "string" && data.reason.trim())
+      throw new Error(data.reason);
+    const rawDetail = text.trim().slice(0, 200);
+    const detail = rawDetail.startsWith("<") ? "" : rawDetail;
+    throw new Error(
+      detail ||
+        `LifeTagger server returned ${response.status}${response.statusText ? ` ${response.statusText}` : ""}.`,
+    );
+  }
+
+  if (!data) throw new Error("LifeTagger returned an unexpected response.");
   return data;
 }
 
@@ -86,7 +106,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
-  rescan: () => request<unknown>("/api/index/rescan", { method: "POST" }),
+  rescan: () =>
+    request<{ ok: boolean; started?: boolean; reason?: string }>(
+      "/api/index/rescan",
+      { method: "POST" },
+    ),
 
   batch: (date?: string) =>
     request<BatchResponse>(`/api/batch/today${query({ date })}`),
@@ -110,9 +134,11 @@ export const api = {
     limit?: number;
     sort?: string;
   }) =>
-    request<{ files: FileSummary[]; cursor: number | null }>(
-      `/api/files${query(params)}`,
-    ),
+    request<{
+      files: FileSummary[];
+      cursor: number | null;
+      hasMore: boolean;
+    }>(`/api/files${query(params)}`),
   file: (id: number) => request<FileDetail>(`/api/files/${id}`),
   save: (id: number, tags: Tag[], description: string, date?: string) =>
     request<FileDetail & { undoId: number; metadataWritable: boolean }>(
@@ -149,15 +175,21 @@ export const api = {
     }>("/api/tags"),
 
   renameTag: (key: string, from: string, to: string) =>
-    request<{ updated: number }>("/api/tags/rename", {
-      method: "POST",
-      body: JSON.stringify({ key, from, to }),
-    }),
+    request<{ started: boolean; updated: number; reason?: string }>(
+      "/api/tags/rename",
+      {
+        method: "POST",
+        body: JSON.stringify({ key, from, to }),
+      },
+    ),
   removeTag: (key: string, value: string) =>
-    request<{ updated: number }>("/api/tags/remove", {
-      method: "POST",
-      body: JSON.stringify({ key, value }),
-    }),
+    request<{ started: boolean; updated: number; reason?: string }>(
+      "/api/tags/remove",
+      {
+        method: "POST",
+        body: JSON.stringify({ key, value }),
+      },
+    ),
   setKey: (key: string, multiValue: boolean) =>
     request<{ ok: boolean }>("/api/tags/keys", {
       method: "POST",
@@ -171,10 +203,12 @@ export const api = {
       "/api/migration",
     ),
   scanMigration: () =>
-    request<{ state: MigrationState; rows: MigrationTagRow[] }>(
-      "/api/migration/scan",
-      { method: "POST" },
-    ),
+    request<{
+      started: boolean;
+      reason?: string;
+      state: MigrationState;
+      rows: MigrationTagRow[];
+    }>("/api/migration/scan", { method: "POST" }),
   mapMigration: (
     mappings: {
       legacyValue: string;
@@ -193,6 +227,7 @@ export const api = {
   applyMigration: (stripFilenames: boolean) =>
     request<{
       started: boolean;
+      reason?: string;
       state: MigrationState;
       rows: MigrationTagRow[];
     }>("/api/migration/apply", {
@@ -225,10 +260,13 @@ export const api = {
       method: "POST",
     }),
   labelCluster: (faceIds: number[], person: string) =>
-    request<{ updated: number }>("/api/faces/clusters/label", {
-      method: "POST",
-      body: JSON.stringify({ faceIds, person }),
-    }),
+    request<{ started: boolean; updated: number; reason?: string }>(
+      "/api/faces/clusters/label",
+      {
+        method: "POST",
+        body: JSON.stringify({ faceIds, person }),
+      },
+    ),
   processFaces: (fileId: number) =>
     request<{ faces: FileDetail["faces"]; available: boolean }>(
       `/api/files/${fileId}/faces/process`,

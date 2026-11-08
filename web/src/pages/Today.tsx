@@ -37,6 +37,7 @@ export default function TodayPage() {
   const [undoId, setUndoId] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const taskBusy = Boolean(status.data?.task?.running);
   const item = batch.data?.items[0];
   const suggestions = (item?.suggestions ?? []).filter(
     (suggestion) => !rejected.has(`${suggestion.key}\u0000${suggestion.value}`),
@@ -57,6 +58,7 @@ export default function TodayPage() {
   const save = useMutation({
     mutationFn: () => api.save(item!.id, tags, description, batch.data?.date),
     onSuccess: (result) => {
+      setError(null);
       setUndoId(result.undoId);
       setNotice(
         result.metadataWritable
@@ -89,6 +91,7 @@ export default function TodayPage() {
   const undo = useMutation({
     mutationFn: () => api.undo(undoId!, batch.data?.date),
     onSuccess: () => {
+      setError(null);
       setUndoId(null);
       setNotice("Change undone.");
       client.invalidateQueries({ queryKey: ["batch"] });
@@ -282,7 +285,7 @@ export default function TodayPage() {
                   .rejectSuggestion(item.id, suggestion, data.date)
                   .catch(() => undefined);
               }}
-              disabled={save.isPending}
+              disabled={save.isPending || taskBusy}
             />
           </div>
 
@@ -313,7 +316,7 @@ export default function TodayPage() {
             <button
               className="btn"
               onClick={() => skip.mutate()}
-              disabled={skip.isPending || save.isPending}
+              disabled={skip.isPending || save.isPending || taskBusy}
               aria-label="Skip this file"
             >
               <SkipForward size={17} />
@@ -321,7 +324,12 @@ export default function TodayPage() {
             <button
               className="btn btn-primary btn-lg"
               onClick={() => save.mutate()}
-              disabled={save.isPending || skip.isPending || tags.length === 0}
+              disabled={
+                save.isPending ||
+                skip.isPending ||
+                taskBusy ||
+                tags.length === 0
+              }
             >
               {save.isPending ? (
                 <Loader2 className="animate-spin" size={18} />
@@ -340,6 +348,7 @@ export default function TodayPage() {
           <button
             className="btn btn-ghost px-3 py-1.5 text-sm text-teal-300"
             onClick={() => undo.mutate()}
+            disabled={taskBusy}
           >
             <Undo2 size={14} /> Undo
           </button>

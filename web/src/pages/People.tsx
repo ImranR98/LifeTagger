@@ -6,7 +6,19 @@ import { api } from "../api";
 
 export default function PeoplePage() {
   const client = useQueryClient();
-  const status = useQuery({ queryKey: ["status"], queryFn: api.status });
+  const status = useQuery({
+    queryKey: ["status"],
+    queryFn: api.status,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data?.task?.running) return 1500;
+      if (data?.indexing.running) return 2500;
+      return false;
+    },
+  });
+  const busy =
+    Boolean(status.data?.task?.running) ||
+    Boolean(status.data?.indexing.running);
   const people = useQuery({
     queryKey: ["people"],
     queryFn: api.people,
@@ -46,6 +58,13 @@ export default function PeoplePage() {
         </h2>
         {people.isLoading ? (
           <div className="skeleton h-24 rounded-2xl" />
+        ) : people.isError ? (
+          <div className="card p-5 text-sm text-slate-400">
+            <p>Known people could not be loaded.</p>
+            <button className="btn mt-3" onClick={() => people.refetch()}>
+              Try again
+            </button>
+          </div>
         ) : people.data?.people.length ? (
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {people.data.people.map((person) => (
@@ -82,12 +101,20 @@ export default function PeoplePage() {
         </h2>
         {clusters.isLoading ? (
           <div className="skeleton h-36 rounded-2xl" />
+        ) : clusters.isError ? (
+          <div className="card p-5 text-sm text-slate-400">
+            <p>Unknown clusters could not be loaded.</p>
+            <button className="btn mt-3" onClick={() => clusters.refetch()}>
+              Try again
+            </button>
+          </div>
         ) : clusters.data?.clusters.length ? (
           <div className="space-y-3">
             {clusters.data.clusters.map((cluster) => (
               <ClusterCard
                 key={cluster.id}
                 cluster={cluster}
+                disabled={busy}
                 onNamed={() => {
                   client.invalidateQueries({ queryKey: ["clusters"] });
                   client.invalidateQueries({ queryKey: ["people"] });
@@ -109,6 +136,7 @@ export default function PeoplePage() {
 
 function ClusterCard({
   cluster,
+  disabled,
   onNamed,
 }: {
   cluster: {
@@ -118,6 +146,7 @@ function ClusterCard({
     representativeFileId: number | null;
     faces: { fileId: number; name: string }[];
   };
+  disabled?: boolean;
   onNamed: () => void;
 }) {
   const [name, setName] = useState("");
@@ -162,12 +191,13 @@ function ClusterCard({
           className="input"
           placeholder="Who is this?"
           value={name}
+          disabled={disabled}
           onChange={(event) => setName(event.target.value)}
         />
         <button
           className="btn btn-primary"
           type="submit"
-          disabled={!name.trim() || label.isPending}
+          disabled={!name.trim() || label.isPending || disabled}
         >
           {label.isPending ? (
             <Loader2 size={15} className="animate-spin" />

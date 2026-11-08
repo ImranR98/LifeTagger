@@ -341,12 +341,31 @@ function replaceFileTagsUnsafe(
   source = "user",
 ): void {
   const clean = dedupeTags(tags);
-  statement("DELETE FROM file_tags WHERE file_id = ?").run(fileId);
-  for (const tag of clean) {
-    const tagId = upsertTag(tag);
-    statement(
-      "INSERT OR IGNORE INTO file_tags(file_id, tag_id, source, created_at) VALUES(?, ?, ?, ?)",
-    ).run(fileId, tagId, source, now());
+  const desired = new Map<number, Tag>();
+  for (const tag of clean) desired.set(upsertTag(tag), tag);
+
+  const current = new Set(
+    (
+      statement("SELECT tag_id FROM file_tags WHERE file_id = ?").all(
+        fileId,
+      ) as { tag_id: number }[]
+    ).map((row) => row.tag_id),
+  );
+
+  for (const tagId of current) {
+    if (!desired.has(tagId)) {
+      statement("DELETE FROM file_tags WHERE file_id = ? AND tag_id = ?").run(
+        fileId,
+        tagId,
+      );
+    }
+  }
+  for (const tagId of desired.keys()) {
+    if (!current.has(tagId)) {
+      statement(
+        "INSERT OR IGNORE INTO file_tags(file_id, tag_id, source, created_at) VALUES(?, ?, ?, ?)",
+      ).run(fileId, tagId, source, now());
+    }
   }
   updateFts(fileId);
 }
@@ -370,6 +389,27 @@ export function addFaceTag(fileId: number, person: string): void {
 
 export function addTagToFile(fileId: number, tag: Tag, source = "user"): void {
   replaceFileTags(fileId, [...tagsForFile(fileId), tag], source);
+}
+
+/** Remove a tag only when it was added by the expected subsystem. */
+export function removeTagFromFileIfSource(
+  fileId: number,
+  tag: Tag,
+  source: string,
+): boolean {
+  const row = statement(
+    `SELECT ft.tag_id FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+     WHERE ft.file_id = ? AND t.key = ? AND t.value_norm = ? AND ft.source = ?
+     LIMIT 1`,
+  ).get(fileId, tag.key, valueNorm(tag.value), source) as
+    { tag_id: number } | undefined;
+  if (!row) return false;
+  statement("DELETE FROM file_tags WHERE file_id = ? AND tag_id = ?").run(
+    fileId,
+    row.tag_id,
+  );
+  updateFts(fileId);
+  return true;
 }
 
 export function updateFts(fileId: number): void {
@@ -521,16 +561,14 @@ export function fileRowsWithLegacy(): FileRow[] {
   ).all() as FileRow[];
 }
 
-export function deleteMissingFiles(scanGeneration: number): number {
+export function deleteMissingFiles(scanGeneration: number): number[] {
   const ids = statement("SELECT id FROM files WHERE scan_generation <> ?").all(
     scanGeneration,
   ) as { id: number }[];
-  const result = statement("DELETE FROM files WHERE scan_generation <> ?").run(
-    scanGeneration,
-  );
+  statement("DELETE FROM files WHERE scan_generation <> ?").run(scanGeneration);
   for (const row of ids)
     statement("DELETE FROM files_fts WHERE rowid = ?").run(row.id);
-  return Number(result.changes);
+  return ids.map((row) => row.id);
 }
 
 export function touchFileScan(fileId: number, scanGeneration: number): void {
@@ -623,7 +661,7 @@ export function listFileRows(filter: FileListFilter): FileRow[] {
       : filter.sort === "name"
         ? "f.name COLLATE NOCASE ASC, f.id ASC"
         : "f.id DESC";
-  const limit = Math.max(1, Math.min(200, filter.limit ?? 40));
+  const limit = Math.max(1, Math.min(201, filter.limit ?? 40));
   const sql = `SELECT f.* FROM files f ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY ${order} LIMIT ?`;
   return statement(sql).all(...params, limit) as FileRow[];
 }
@@ -1098,6 +1136,7 @@ export function labeledFaces(): (FaceRow & { file_path: string })[] {
     `SELECT f.*, t.value AS label, files.path AS file_path
      FROM faces f JOIN tags t ON t.id = f.person_tag_id JOIN files ON files.id = f.file_id
      WHERE f.person_tag_id IS NOT NULL
+     ORDER BY f.quality DESC
      LIMIT 5000`,
   ).all() as (FaceRow & { file_path: string })[];
 }
@@ -1108,7 +1147,9 @@ export function unknownFaces(): (FaceRow & {
 })[] {
   return statement(
     `SELECT f.*, files.path AS file_path, files.name AS name FROM faces f JOIN files ON files.id = f.file_id
-     WHERE f.person_tag_id IS NULL`,
+     WHERE f.person_tag_id IS NULL
+     ORDER BY f.quality DESC
+     LIMIT 800`,
   ).all() as (FaceRow & { file_path: string; name: string })[];
 }
 

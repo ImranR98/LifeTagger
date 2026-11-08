@@ -19,7 +19,8 @@ export default function LibraryPage() {
         limit: 60,
       }),
     initialPageParam: undefined as number | undefined,
-    getNextPageParam: (last) => last.cursor ?? undefined,
+    getNextPageParam: (last) =>
+      last.hasMore ? (last.cursor ?? undefined) : undefined,
   });
   const rows = files.data?.pages.flatMap((page) => page.files) ?? [];
 
@@ -84,7 +85,21 @@ export default function LibraryPage() {
         </div>
       )}
 
-      {!files.isLoading && rows.length === 0 && (
+      {files.isError && (
+        <div className="card p-6">
+          <p className="font-semibold">The library could not be loaded.</p>
+          <p className="mt-1 text-sm text-slate-400">
+            {files.error instanceof Error
+              ? files.error.message
+              : "The server did not respond."}
+          </p>
+          <button className="btn mt-4" onClick={() => files.refetch()}>
+            Try again
+          </button>
+        </div>
+      )}
+
+      {!files.isLoading && !files.isError && rows.length === 0 && (
         <div className="card p-8 text-center">
           <p className="font-semibold">No files match.</p>
           <p className="mt-1 text-sm text-slate-500">

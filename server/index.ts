@@ -8,6 +8,7 @@ import { startIndexer, stopIndexer, indexState } from "./indexer";
 import { closeMetadata } from "./metadata";
 import { startPushScheduler } from "./push";
 import { startDbSnapshots, stopDbSnapshots } from "./backup";
+import { isTaskRunning } from "./tasks";
 
 const app = express();
 app.set("trust proxy", true);
@@ -102,14 +103,17 @@ async function shutdown(signal: string) {
   stopIndexer();
   stopDbSnapshots();
   server.close();
-  if (!indexState.running) {
+  // Do not close the database or ExifTool underneath a long-running job.
+  // Kubernetes will terminate the process after its grace period.
+  const longTaskRunning = indexState.running || isTaskRunning();
+  if (!longTaskRunning) {
     try {
       db.close();
     } catch {
       // already closed
     }
+    await closeMetadata().catch(() => undefined);
   }
-  if (!indexState.running) await closeMetadata().catch(() => undefined);
   process.exit(0);
 }
 

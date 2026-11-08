@@ -24,6 +24,13 @@ export default function FileDetailPage() {
     enabled: Number.isFinite(fileId),
   });
   const tagsQuery = useQuery({ queryKey: ["tags"], queryFn: api.tags });
+  const status = useQuery({
+    queryKey: ["status"],
+    queryFn: api.status,
+    refetchInterval: (query) =>
+      query.state.data?.task?.running ? 1500 : false,
+  });
+  const taskBusy = Boolean(status.data?.task?.running);
   const [tags, setTags] = useState<Tag[]>([]);
   const [description, setDescription] = useState("");
   const [undoId, setUndoId] = useState<number | null>(null);
@@ -40,6 +47,7 @@ export default function FileDetailPage() {
   const save = useMutation({
     mutationFn: () => api.save(fileId, tags, description),
     onSuccess: (result) => {
+      setError(null);
       setUndoId(result.undoId);
       setNotice(
         result.metadataWritable
@@ -61,6 +69,7 @@ export default function FileDetailPage() {
   const undo = useMutation({
     mutationFn: () => api.undo(undoId!),
     onSuccess: () => {
+      setError(null);
       setUndoId(null);
       setNotice("Change undone.");
       client.invalidateQueries({ queryKey: ["file", fileId] });
@@ -71,6 +80,7 @@ export default function FileDetailPage() {
   const detect = useMutation({
     mutationFn: () => api.processFaces(fileId),
     onSuccess: () => {
+      setError(null);
       client.invalidateQueries({ queryKey: ["file", fileId] });
       client.invalidateQueries({ queryKey: ["people"] });
     },
@@ -145,7 +155,7 @@ export default function FileDetailPage() {
               <button
                 className="btn px-3 py-1.5 text-xs"
                 onClick={() => detect.mutate()}
-                disabled={detect.isPending}
+                disabled={detect.isPending || taskBusy}
               >
                 {detect.isPending ? (
                   <Loader2 size={14} className="animate-spin" />
@@ -163,6 +173,7 @@ export default function FileDetailPage() {
                     face={face}
                     index={index}
                     fileId={fileId}
+                    disabled={taskBusy}
                   />
                 ))}
               </div>
@@ -183,7 +194,7 @@ export default function FileDetailPage() {
               keys={availableKeys}
               values={tagsQuery.data?.values}
               onChange={setTags}
-              disabled={save.isPending}
+              disabled={save.isPending || taskBusy}
             />
           </div>
           <div className="card p-4">
@@ -211,6 +222,7 @@ export default function FileDetailPage() {
                 <button
                   className="btn btn-ghost px-2 py-1 text-xs text-teal-300"
                   onClick={() => undo.mutate()}
+                  disabled={taskBusy}
                 >
                   <Undo2 size={13} /> Undo
                 </button>
@@ -221,7 +233,7 @@ export default function FileDetailPage() {
           <button
             className="btn btn-primary btn-lg w-full"
             onClick={() => save.mutate()}
-            disabled={save.isPending}
+            disabled={save.isPending || taskBusy}
           >
             {save.isPending ? (
               <Loader2 className="animate-spin" size={18} />
@@ -240,10 +252,12 @@ function FaceLabel({
   face,
   index,
   fileId,
+  disabled,
 }: {
   face: Face;
   index: number;
   fileId: number;
+  disabled?: boolean;
 }) {
   const client = useQueryClient();
   const [name, setName] = useState(face.label ?? "");
@@ -272,13 +286,14 @@ function FaceLabel({
       <input
         className="input min-h-9 py-1.5"
         value={name}
+        disabled={disabled}
         onChange={(event) => setName(event.target.value)}
         placeholder={face.label ?? "Name this person"}
       />
       <button
         className="btn px-3 py-1.5 text-xs"
         onClick={() => label.mutate()}
-        disabled={label.isPending}
+        disabled={label.isPending || disabled}
       >
         {label.isPending ? (
           <Loader2 size={13} className="animate-spin" />

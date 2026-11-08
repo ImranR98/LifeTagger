@@ -9,6 +9,7 @@ import {
   getMediaRoot,
   getSetting,
   nextScanGeneration,
+  setSetting,
   tagsForFile,
   touchFileScan,
   upsertFile,
@@ -17,6 +18,7 @@ import {
 import { readMetadata } from "./metadata";
 import { cleanAssetCaches } from "./media";
 import { facesAvailable, queueFaceProcessing } from "./faces";
+import { isTaskRunning } from "./tasks";
 
 export type IndexState = {
   running: boolean;
@@ -58,6 +60,7 @@ const SKIP_DIRS = new Set([
 ]);
 
 let walkErrors = 0;
+let legacyChanged = false;
 
 async function walk(
   root: string,
@@ -141,6 +144,10 @@ async function doScan(): Promise<void> {
     serverLog.warn("media root does not exist", root);
     return;
   }
+  if (isTaskRunning()) {
+    serverLog.info("index skipped because another task is running");
+    return;
+  }
   const generation = nextScanGeneration();
   indexState.running = true;
   indexState.scanned = 0;
@@ -150,6 +157,7 @@ async function doScan(): Promise<void> {
   indexState.startedAt = new Date().toISOString();
   indexState.finishedAt = null;
   walkErrors = 0;
+  legacyChanged = false;
   serverLog.info("indexing", root);
   try {
     const entries = await walk(root);
@@ -167,8 +175,10 @@ async function doScan(): Promise<void> {
           touchFileScan(existing.id, generation);
           return;
         }
-        if (existing) await cleanAssetCaches(existing.id);
         const meta = await readMetadata(entry.absolutePath, entry.relativePath);
+        if (existing) await cleanAssetCaches(existing.id);
+        if (meta.legacyPending || existing?.legacy_pending === 1)
+          legacyChanged = true;
         // Formats that cannot carry metadata keep their tags in the index.
         // Preserve those tags when the file is re-read or moved.
         const indexedTags =
@@ -209,13 +219,15 @@ async function doScan(): Promise<void> {
       }
     });
     if (walkErrors === 0 && indexState.errors === 0) {
-      deleteMissingFiles(generation);
+      const removedIds = deleteMissingFiles(generation);
+      for (const id of removedIds) await cleanAssetCaches(id);
     } else {
       if (walkErrors > 0) indexState.errors += walkErrors;
       serverLog.warn(
         "skipped missing-file cleanup because some entries could not be read",
       );
     }
+    if (legacyChanged) setSetting("migrationNeedsScan", "true");
     if (facesAvailable()) {
       // Seed the face matcher from already-tagged people. These are often the
       // imported/migrated photos that give new photos something to match.

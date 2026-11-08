@@ -8,6 +8,19 @@ import "./index.css";
 
 registerSW({ immediate: true });
 
+declare global {
+  interface Window {
+    __lifetaggerInstallPrompt?: Event;
+  }
+}
+
+// Capture this once at startup. Waiting for the Settings page to mount often
+// misses the event entirely.
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  window.__lifetaggerInstallPrompt = event;
+});
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

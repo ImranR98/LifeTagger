@@ -88,14 +88,35 @@ export type MigrationTagRow = {
 
 export type MigrationState = {
   scanned: boolean;
+  needsScan: boolean;
   legacyFiles: number;
   legacyTags: number;
   appliedFiles: number;
   pendingFiles: number;
   running: boolean;
+  mode: "scan" | "apply" | null;
   errors: number;
   processed: number;
   total: number;
+  lastError: string | null;
+};
+
+export type TaskKind =
+  | "migration-scan"
+  | "migration-apply"
+  | "tag-rename"
+  | "tag-remove"
+  | "cluster-label";
+
+export type TaskState = {
+  kind: TaskKind;
+  running: boolean;
+  processed: number;
+  total: number;
+  errors: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  message: string | null;
 };
 
 export type StatusResponse = {
@@ -118,6 +139,7 @@ export type StatusResponse = {
   };
   versions: { app: string; exiftool: string };
   facesEnabled: boolean;
+  task: TaskState | null;
 };
 
 export type SettingsResponse = {

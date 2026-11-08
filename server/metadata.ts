@@ -182,6 +182,15 @@ function stringList(value: unknown): string[] {
   return [];
 }
 
+function sameStringSet(expected: string[], actual: string[]): boolean {
+  const expectedSet = new Set(expected);
+  const actualSet = new Set(actual);
+  return (
+    expectedSet.size === actualSet.size &&
+    [...expectedSet].every((entry) => actualSet.has(entry))
+  );
+}
+
 export function tagsFromMetadata(tags: Record<string, unknown>): Tag[] {
   const subject = stringList(tags.Subject);
   const keywords = stringList(tags.Keywords);
@@ -204,6 +213,11 @@ export async function readMetadata(
     >;
   } catch (error) {
     serverLog.warn("metadata read failed", relativePath, error);
+    // Do not treat a failed read as an empty file. The indexer uses this
+    // signal to keep the existing row and tags instead of overwriting them.
+    throw new Error(
+      `Could not read metadata: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   const tagsList = tagsFromMetadata(tags);
   const description = String(
@@ -288,24 +302,38 @@ export async function writeMetadata(
   const entries = clean.map(formatTag);
   await backupMetadata(input.relativePath, input.absolutePath);
   try {
-    await exiftool.write(
-      input.absolutePath,
-      {
-        Subject: entries,
-        Description: input.description,
-      },
-      ["-overwrite_original"],
-    );
+    const metadata = {
+      Subject: entries,
+      // Keep the documented cross-application mirror. Some formats do not
+      // support IPTC, in which case ExifTool leaves Subject as the authority.
+      "IPTC:Keywords": entries,
+      Description: input.description,
+    } as unknown as Parameters<typeof exiftool.write>[1];
+    await exiftool.write(input.absolutePath, metadata, ["-overwrite_original"]);
     const check = (await exiftool.read(
       input.absolutePath,
     )) as unknown as Record<string, unknown>;
     const written = stringList(check.Subject);
-    const expected = new Set(entries);
-    const actual = new Set(written);
-    const matches =
-      expected.size === actual.size &&
-      [...expected].every((entry) => actual.has(entry));
-    if (!matches) throw new Error("metadata verification failed");
+    if (!sameStringSet(entries, written))
+      throw new Error("metadata verification failed");
+    try {
+      const iptc = (await exiftool.readRaw(input.absolutePath, {
+        readArgs: ["-IPTC:Keywords"],
+      })) as Record<string, unknown>;
+      if (!sameStringSet(entries, stringList(iptc.Keywords))) {
+        serverLog.warn(
+          "IPTC keywords were not mirrored",
+          input.relativePath,
+          "the file is still readable through XMP-dc:Subject",
+        );
+      }
+    } catch (error) {
+      serverLog.warn(
+        "IPTC keyword verification failed",
+        input.relativePath,
+        error,
+      );
+    }
     const date = captureDate(check);
     const stat = await fs.promises.stat(input.absolutePath);
     if (fs.existsSync(`${input.absolutePath}_original`)) {

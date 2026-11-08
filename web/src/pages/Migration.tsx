@@ -22,8 +22,20 @@ export default function MigrationPage() {
     queryKey: ["migration"],
     queryFn: api.migration,
     refetchInterval: (query) =>
-      query.state.data?.state.running ? 1500 : false,
+      query.state.data?.state.running ? 1200 : false,
   });
+  const status = useQuery({
+    queryKey: ["status"],
+    queryFn: api.status,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data?.task?.running) return 1500;
+      if (data?.indexing.running) return 2500;
+      return false;
+    },
+  });
+  const statusReady = status.data !== undefined;
+  const indexing = status.data?.indexing.running ?? false;
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [bulkKey, setBulkKey] = useState("");
   const [strip, setStrip] = useState(true);
@@ -90,10 +102,19 @@ export default function MigrationPage() {
 
   const scan = useMutation({
     mutationFn: api.scanMigration,
-    onSuccess: () => {
-      setDrafts({});
-      setMessage(null);
+    onSuccess: (result) => {
+      if (!result.started) {
+        setError(result.reason ?? "Could not start the migration scan");
+        return;
+      }
+      setError(null);
+      setMessage(
+        result.state.running
+          ? "Scanning the library for legacy tags…"
+          : "Scan complete.",
+      );
       client.invalidateQueries({ queryKey: ["migration"] });
+      client.invalidateQueries({ queryKey: ["status"] });
     },
     onError: (mutationError) =>
       setError(
@@ -102,19 +123,28 @@ export default function MigrationPage() {
   });
 
   useEffect(() => {
+    const state = migration.data?.state;
     if (
       !autoScanStarted.current &&
-      migration.data &&
-      !migration.data.state.scanned &&
+      state &&
+      statusReady &&
+      (!state.scanned || state.needsScan) &&
+      !state.running &&
+      !state.errors &&
+      !indexing &&
       !scan.isPending
     ) {
       autoScanStarted.current = true;
       scan.mutate();
     }
-  }, [migration.data, scan.isPending]);
+  }, [migration.data, scan.isPending, indexing, statusReady]);
 
   function mappingsFromDrafts() {
+    const current = new Set(
+      (migration.data?.rows ?? []).map((row) => row.legacyValue),
+    );
     return Object.entries(drafts)
+      .filter(([legacyValue]) => current.has(legacyValue))
       .map(([legacyValue, draft]) => ({ legacyValue, ...draft }))
       .filter((mapping) => mapping.action === "skip" || mapping.key.trim());
   }
@@ -149,9 +179,13 @@ export default function MigrationPage() {
       // Apply works on the server-side mapping, so persist the table as it is
       // right now instead of relying on the user pressing Save first.
       await api.mapMigration(mappingsFromDrafts());
-      return api.applyMigration(strip);
+      const result = await api.applyMigration(strip);
+      if (!result.started)
+        throw new Error(result.reason ?? "Could not start the migration");
+      return result;
     },
     onSuccess: () => {
+      setError(null);
       setMessage(
         "Migration started. This can take a while for a large library.",
       );
@@ -182,6 +216,18 @@ export default function MigrationPage() {
   const progress = state?.total
     ? Math.round((state.processed / state.total) * 100)
     : 0;
+  const busy =
+    Boolean(state?.running) ||
+    !statusReady ||
+    indexing ||
+    Boolean(status.data?.task?.running) ||
+    scan.isPending ||
+    apply.isPending ||
+    save.isPending;
+  const needsRefresh = Boolean(state?.needsScan) && !state?.running;
+  const scanning = state?.mode === "scan" || scan.isPending;
+  const applying = state?.mode === "apply" || apply.isPending;
+  const indexingProgress = status.data?.indexing;
 
   return (
     <div className="space-y-5">
@@ -204,30 +250,57 @@ export default function MigrationPage() {
         </Link>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+      {indexing && (
+        <div className="rounded-2xl border border-sky-300/30 bg-sky-300/10 p-3 text-sm text-sky-100">
+          <div className="flex items-center gap-2">
+            <Loader2 size={16} className="shrink-0 animate-spin" />
+            <span className="flex-1 font-semibold">
+              Indexing your library before migration can continue
+            </span>
+            <span className="tabular-nums text-xs text-sky-200">
+              {indexingProgress?.scanned.toLocaleString() ?? 0}
+              {indexingProgress?.total
+                ? ` / ${indexingProgress.total.toLocaleString()}`
+                : ""}
+            </span>
+          </div>
+          <p className="mt-1 text-xs text-sky-200/80">
+            Scanning and applying legacy tags are disabled until indexing
+            finishes so the migration inventory cannot be built from a
+            half-indexed library.
+          </p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
         <Metric label="Legacy files" value={state?.legacyFiles ?? "—"} />
         <Metric label="Unique strings" value={state?.legacyTags ?? "—"} />
         <Metric label="Mapped" value={mappedCount} />
         <Metric label="Pending" value={state?.pendingFiles ?? "—"} />
+        <Metric label="Applied" value={state?.appliedFiles ?? "—"} />
       </div>
 
       <div className="flex flex-wrap gap-2">
         <button
           className="btn"
           onClick={() => scan.mutate()}
-          disabled={scan.isPending || state?.running}
+          disabled={scan.isPending || busy}
         >
-          {scan.isPending ? (
+          {scanning ? (
             <Loader2 size={15} className="animate-spin" />
           ) : (
             <RefreshCw size={15} />
           )}
-          {state?.scanned ? "Scan again" : "Scan for legacy tags"}
+          {scanning
+            ? "Scanning…"
+            : state?.scanned
+              ? "Scan again"
+              : "Scan for legacy tags"}
         </button>
         <button
           className="btn"
           onClick={() => save.mutate()}
-          disabled={save.isPending || rows.length === 0 || state?.running}
+          disabled={save.isPending || rows.length === 0 || busy || needsRefresh}
         >
           {save.isPending ? (
             <Loader2 size={15} className="animate-spin" />
@@ -253,20 +326,22 @@ export default function MigrationPage() {
             apply.isPending ||
             !state?.scanned ||
             state?.pendingFiles === 0 ||
-            state?.running
+            busy ||
+            needsRefresh
           }
         >
-          {apply.isPending || state?.running ? (
+          {applying ? (
             <Loader2 size={15} className="animate-spin" />
           ) : (
             <Play size={15} />
           )}
-          Apply migration
+          {applying ? "Applying…" : "Apply migration"}
         </button>
         <label className="flex items-center gap-2 rounded-xl border border-slate-800 px-3 text-sm text-slate-400">
           <input
             type="checkbox"
             checked={strip}
+            disabled={busy || needsRefresh}
             onChange={(event) => setStrip(event.target.checked)}
           />
           Strip old filename suffixes
@@ -281,7 +356,7 @@ export default function MigrationPage() {
         <button
           className="btn"
           onClick={exportMapping}
-          disabled={rows.length === 0}
+          disabled={rows.length === 0 || busy || needsRefresh}
           title="Download the mapping as JSON"
         >
           <Download size={15} /> Export
@@ -289,6 +364,7 @@ export default function MigrationPage() {
         <button
           className="btn"
           onClick={() => fileInput.current?.click()}
+          disabled={busy || needsRefresh}
           title="Load a mapping JSON file"
         >
           <Upload size={15} /> Import
@@ -306,12 +382,25 @@ export default function MigrationPage() {
         />
       </div>
 
+      {needsRefresh && (
+        <div className="rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">
+          The legacy inventory is out of date. Run Scan again before editing or
+          applying the mapping.
+        </div>
+      )}
+
       {state?.running && (
         <div className="card p-4">
-          <div className="mb-2 flex justify-between text-xs text-slate-400">
-            <span>Applying metadata…</span>
-            <span>
-              {state.processed}/{state.total} · {state.errors} errors
+          <div className="mb-2 flex justify-between gap-3 text-xs text-slate-400">
+            <span className="font-semibold text-slate-200">
+              {state.mode === "scan"
+                ? "Scanning the indexed library…"
+                : "Applying metadata…"}
+            </span>
+            <span className="tabular-nums">
+              {state.processed.toLocaleString()} /{" "}
+              {state.total.toLocaleString()} · {state.errors} error
+              {state.errors === 1 ? "" : "s"}
             </span>
           </div>
           <div className="progress-track">
@@ -333,9 +422,15 @@ export default function MigrationPage() {
       {state && state.errors > 0 && !state.running && (
         <div className="flex items-start gap-2 rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">
           <AlertTriangle size={16} className="mt-0.5 shrink-0" />
-          {state.errors} files could not be applied. Check that every legacy
-          string above has a key (or is explicitly skipped), and that filenames
-          do not collide.
+          Migration reported {state.errors} error
+          {state.errors === 1 ? "" : "s"}. Check that every legacy string above
+          has a key (or is explicitly skipped), and that filenames do not
+          collide.
+          {state.lastError && (
+            <span className="mt-1 block break-words font-mono text-[11px] text-amber-200/80">
+              {state.lastError}
+            </span>
+          )}
         </div>
       )}
 
@@ -360,13 +455,14 @@ export default function MigrationPage() {
               <input
                 className="input"
                 value={bulkKey}
+                disabled={busy || needsRefresh}
                 onChange={(event) => setBulkKey(event.target.value)}
                 placeholder="e.g. place, event, people, keyword"
               />
             </label>
             <button
               className="btn"
-              disabled={!bulkKey.trim()}
+              disabled={!bulkKey.trim() || busy || needsRefresh}
               onClick={() => {
                 const key = bulkKey.trim();
                 setDrafts((current) => {
@@ -410,6 +506,7 @@ export default function MigrationPage() {
                         action: "map",
                       }
                     }
+                    disabled={busy || needsRefresh}
                     onChange={(draft) =>
                       setDrafts((current) => ({
                         ...current,
@@ -430,10 +527,12 @@ export default function MigrationPage() {
 function MappingRow({
   row,
   draft,
+  disabled,
   onChange,
 }: {
   row: MigrationTagRow;
   draft: Draft;
+  disabled?: boolean;
   onChange: (draft: Draft) => void;
 }) {
   const skipped = draft.action === "skip";
@@ -450,7 +549,7 @@ function MappingRow({
         <input
           className="input min-h-8 min-w-28 py-1 text-xs"
           value={draft.key}
-          disabled={skipped}
+          disabled={skipped || disabled}
           onChange={(event) =>
             onChange({ ...draft, key: event.target.value, action: "map" })
           }
@@ -461,7 +560,7 @@ function MappingRow({
         <input
           className="input min-h-8 min-w-36 py-1 text-xs"
           value={draft.value}
-          disabled={skipped}
+          disabled={skipped || disabled}
           onChange={(event) =>
             onChange({ ...draft, value: event.target.value, action: "map" })
           }
@@ -471,6 +570,7 @@ function MappingRow({
         <input
           type="checkbox"
           checked={skipped}
+          disabled={disabled}
           onChange={(event) =>
             onChange({
               ...draft,

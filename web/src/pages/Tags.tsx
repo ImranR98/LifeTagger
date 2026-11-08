@@ -6,20 +6,50 @@ import { api } from "../api";
 export default function TagsPage() {
   const client = useQueryClient();
   const tags = useQuery({ queryKey: ["tags"], queryFn: api.tags });
+  const status = useQuery({
+    queryKey: ["status"],
+    queryFn: api.status,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data?.task?.running) return 1500;
+      if (data?.indexing.running) return 2500;
+      return false;
+    },
+  });
   const [newKey, setNewKey] = useState("");
   const [multi, setMulti] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const busy =
+    Boolean(status.data?.task?.running) ||
+    Boolean(status.data?.indexing.running);
 
   const setKey = useMutation({
     mutationFn: ({ key, multiValue }: { key: string; multiValue: boolean }) =>
       api.setKey(key, multiValue),
-    onSuccess: () => client.invalidateQueries({ queryKey: ["tags"] }),
+    onSuccess: () => {
+      setError(null);
+      client.invalidateQueries({ queryKey: ["tags"] });
+    },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not update the key",
+      ),
   });
   const addKey = useMutation({
     mutationFn: () => api.setKey(newKey.trim(), multi),
     onSuccess: () => {
+      setError(null);
       setNewKey("");
       client.invalidateQueries({ queryKey: ["tags"] });
     },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not add the key",
+      ),
   });
 
   const valuesByKey = new Map<string, { value: string; count: number }[]>();
@@ -50,6 +80,7 @@ export default function TagsPage() {
           <input
             className="input"
             value={newKey}
+            disabled={busy}
             onChange={(event) => setNewKey(event.target.value)}
             placeholder="e.g. camera, project, food"
           />
@@ -58,18 +89,39 @@ export default function TagsPage() {
           <input
             type="checkbox"
             checked={multi}
+            disabled={busy}
             onChange={(event) => setMulti(event.target.checked)}
           />{" "}
           multi-value
         </label>
         <button
           className="btn"
-          disabled={!newKey.trim() || addKey.isPending}
+          disabled={!newKey.trim() || addKey.isPending || busy}
           onClick={() => addKey.mutate()}
         >
           <Plus size={15} /> Add key
         </button>
       </div>
+
+      {error && (
+        <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">
+          {error}
+        </div>
+      )}
+
+      {tags.isError && (
+        <div className="card p-6">
+          <p className="font-semibold">Tags could not be loaded.</p>
+          <p className="mt-1 text-sm text-slate-400">
+            {tags.error instanceof Error
+              ? tags.error.message
+              : "The server did not respond."}
+          </p>
+          <button className="btn mt-4" onClick={() => tags.refetch()}>
+            Try again
+          </button>
+        </div>
+      )}
 
       {tags.isLoading && <div className="skeleton h-64 rounded-2xl" />}
 
@@ -97,12 +149,15 @@ export default function TagsPage() {
                   tagKey={key.key}
                   value={entry.value}
                   count={entry.count}
+                  disabled={busy}
+                  onError={setError}
                 />
               ))}
               <label className="flex items-center gap-2 pt-1 text-xs text-slate-500">
                 <input
                   type="checkbox"
                   checked={key.multiValue}
+                  disabled={busy}
                   onChange={(event) =>
                     setKey.mutate({
                       key: key.key,
@@ -124,28 +179,48 @@ function ValueRow({
   tagKey,
   value,
   count,
+  disabled,
+  onError,
 }: {
   tagKey: string;
   value: string;
   count: number;
+  disabled?: boolean;
+  onError: (message: string) => void;
 }) {
   const client = useQueryClient();
   const [next, setNext] = useState(value);
   const rename = useMutation({
     mutationFn: () => api.renameTag(tagKey, value, next.trim()),
     onSuccess: () => {
+      onError("");
       client.invalidateQueries({ queryKey: ["tags"] });
       client.invalidateQueries({ queryKey: ["files"] });
       client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["status"] });
     },
+    onError: (mutationError) =>
+      onError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Rename failed",
+      ),
   });
   const remove = useMutation({
     mutationFn: () => api.removeTag(tagKey, value),
     onSuccess: () => {
+      onError("");
       client.invalidateQueries({ queryKey: ["tags"] });
       client.invalidateQueries({ queryKey: ["files"] });
       client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["status"] });
     },
+    onError: (mutationError) =>
+      onError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Remove failed",
+      ),
   });
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-slate-800 p-2 sm:flex-row sm:items-center">
@@ -156,12 +231,18 @@ function ValueRow({
       <input
         className="input min-h-9 flex-1 py-1.5"
         value={next}
+        disabled={disabled}
         onChange={(event) => setNext(event.target.value)}
       />
       <div className="flex gap-2">
         <button
           className="btn px-3 py-1.5 text-xs"
-          disabled={!next.trim() || next.trim() === value || rename.isPending}
+          disabled={
+            !next.trim() ||
+            next.trim() === value ||
+            rename.isPending ||
+            disabled
+          }
           onClick={() => rename.mutate()}
           title="Rename or merge this value"
         >
@@ -174,7 +255,7 @@ function ValueRow({
         </button>
         <button
           className="btn btn-danger px-3 py-1.5 text-xs"
-          disabled={remove.isPending}
+          disabled={remove.isPending || disabled}
           onClick={() => {
             if (confirm(`Remove ${tagKey}=${value} from all files?`))
               remove.mutate();

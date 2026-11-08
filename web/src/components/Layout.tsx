@@ -13,8 +13,25 @@ import {
   ArrowRight,
   AlertTriangle,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { api } from "../api";
+
+function taskLabel(kind: string): string {
+  switch (kind) {
+    case "migration-scan":
+      return "Scanning legacy tags";
+    case "migration-apply":
+      return "Applying migration";
+    case "tag-rename":
+      return "Renaming tag values";
+    case "tag-remove":
+      return "Removing tag values";
+    case "cluster-label":
+      return "Naming faces";
+    default:
+      return "Working";
+  }
+}
 
 const links = [
   { to: "/today", label: "Today", icon: Sparkles },
@@ -30,16 +47,21 @@ export function Layout({ children }: { children: ReactNode }) {
   const status = useQuery({
     queryKey: ["status"],
     queryFn: api.status,
-    refetchInterval: (query) =>
-      query.state.data?.indexing.running
-        ? 2500
-        : query.state.data?.counts.legacyPending
-          ? 5000
-          : false,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data?.task?.running) return 1500;
+      if (data?.indexing.running) return 2500;
+      if (data?.counts.legacyPending) return 5000;
+      return false;
+    },
   });
   const indexing = status.data?.indexing;
+  const task = status.data?.task;
   const location = useLocation();
   const legacyPending = status.data?.counts.legacyPending ?? 0;
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0 });
+  }, [location.pathname]);
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -72,7 +94,7 @@ export function Layout({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <div className="with-sidebar">
-        <header className="sticky top-0 z-30 border-b border-slate-800/70 bg-[#0b0f14]/80 px-4 py-3 backdrop-blur md:hidden">
+        <header className="sticky top-0 z-30 border-b border-slate-800/70 bg-[#0b0f14]/80 px-4 py-3 backdrop-blur min-[900px]:hidden">
           <div className="mx-auto flex max-w-3xl items-center justify-between">
             <Link to="/today" className="flex items-center gap-2">
               <span className="grid h-8 w-8 place-items-center rounded-lg bg-teal-300 text-slate-950">
@@ -112,6 +134,46 @@ export function Layout({ children }: { children: ReactNode }) {
           )}
         </header>
         <main className="page">
+          {task?.running &&
+            !(
+              location.pathname === "/migration" &&
+              (task.kind === "migration-scan" ||
+                task.kind === "migration-apply")
+            ) && (
+              <div className="mb-4 rounded-2xl border border-sky-300/30 bg-sky-300/10 p-3 text-sm text-sky-100">
+                <div className="flex items-center gap-2">
+                  <Loader2 size={16} className="shrink-0 animate-spin" />
+                  <span className="flex-1 font-semibold">
+                    {taskLabel(task.kind)}
+                  </span>
+                  <span className="tabular-nums text-xs text-sky-200">
+                    {task.processed.toLocaleString()}
+                    {task.total > 0 ? ` / ${task.total.toLocaleString()}` : ""}
+                  </span>
+                </div>
+                {task.total > 0 && (
+                  <div className="progress-track mt-2 h-1">
+                    <div
+                      className="progress-fill"
+                      style={{
+                        width: `${Math.min(100, Math.round((task.processed / task.total) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                )}
+                {task.errors > 0 && (
+                  <p className="mt-1 text-xs text-amber-200">
+                    {task.errors} error{task.errors === 1 ? "" : "s"} so far
+                  </p>
+                )}
+              </div>
+            )}
+          {status.isError && (
+            <div className="mb-4 rounded-2xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">
+              Connection problem. Showing the last known data; retrying in the
+              background.
+            </div>
+          )}
           {legacyPending > 0 && location.pathname !== "/migration" && (
             <Link
               to="/migration"

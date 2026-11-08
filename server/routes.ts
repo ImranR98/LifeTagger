@@ -43,10 +43,11 @@ import {
   applyMigration,
   getMigrationRows,
   getMigrationState,
-  scanMigration,
   setMappings,
+  startMigrationScan,
   type MappingInput,
 } from "./migration";
+import { getTask, isTaskRunning } from "./tasks";
 import {
   faceListForFile,
   facesAvailable,
@@ -117,6 +118,7 @@ router.get("/status", (_req, res) => {
     },
     versions: { app: config.appVersion, exiftool: "bundled" },
     facesEnabled: facesAvailable(),
+    task: getTask(),
   });
 });
 
@@ -131,6 +133,18 @@ router.post("/setup", (req, res) => {
   }
   if (!isWithinAllowedRoots(resolved))
     return fail(res, 400, "That path is outside the allowed media roots");
+  const current = getMediaRoot();
+  if (
+    current &&
+    current !== resolved &&
+    (indexState.running || isTaskRunning())
+  ) {
+    return fail(
+      res,
+      409,
+      "Wait for the current library task to finish before changing the media folder",
+    );
+  }
   setMediaRoot(resolved);
   scanMedia().catch(() => undefined);
   res.json({ ok: true, mediaRoot: resolved });
@@ -177,20 +191,6 @@ router.patch("/settings", (req, res) => {
       parsed.error.issues.map((issue) => issue.message).join("; "),
     );
   const input = parsed.data;
-  if (input.mediaRoot) {
-    const resolved = path.resolve(config.appRoot, input.mediaRoot);
-    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
-      return fail(res, 400, "That path is not a directory on the server");
-    }
-    if (!isWithinAllowedRoots(resolved))
-      return fail(res, 400, "That path is outside the allowed media roots");
-    setMediaRoot(resolved);
-    scanMedia().catch(() => undefined);
-  }
-  if (input.dailyGoal !== undefined)
-    setSetting("dailyGoal", String(input.dailyGoal));
-  if (input.reminderTime !== undefined)
-    setSetting("reminderTime", input.reminderTime);
   if (input.timezone !== undefined) {
     try {
       new Intl.DateTimeFormat("en", { timeZone: input.timezone }).format(
@@ -199,20 +199,67 @@ router.patch("/settings", (req, res) => {
     } catch {
       return fail(res, 400, "That timezone is not recognized");
     }
-    setSetting("timezone", input.timezone);
   }
+  let rootChanged = false;
+  let resolvedRoot: string | null = null;
+  if (input.mediaRoot) {
+    const resolved = path.resolve(config.appRoot, input.mediaRoot);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+      return fail(res, 400, "That path is not a directory on the server");
+    }
+    if (!isWithinAllowedRoots(resolved))
+      return fail(res, 400, "That path is outside the allowed media roots");
+    rootChanged = getMediaRoot() !== resolved;
+    if (rootChanged && indexState.running) {
+      return fail(
+        res,
+        409,
+        "Wait for the current library index to finish before changing the media folder",
+      );
+    }
+    if (rootChanged && isTaskRunning()) {
+      return fail(
+        res,
+        409,
+        "Wait for the current task to finish before changing the media folder",
+      );
+    }
+    if (rootChanged) resolvedRoot = resolved;
+  }
+  if (resolvedRoot) setMediaRoot(resolvedRoot);
+  if (input.dailyGoal !== undefined)
+    setSetting("dailyGoal", String(input.dailyGoal));
+  if (input.reminderTime !== undefined)
+    setSetting("reminderTime", input.reminderTime);
+  if (input.timezone !== undefined) setSetting("timezone", input.timezone);
   if (input.suggestionRadiusM !== undefined)
     setSetting("suggestionRadiusM", String(input.suggestionRadiusM));
   if (input.facesEnabled !== undefined)
     setSetting("facesEnabled", input.facesEnabled ? "true" : "false");
   if (input.faceScanMode !== undefined)
     setSetting("faceScanMode", input.faceScanMode);
+  if (rootChanged) scanMedia().catch(() => undefined);
   res.json({ ok: true });
 });
 
 router.post("/index/rescan", (_req, res) => {
+  if (indexState.running) {
+    return res.json({
+      ok: true,
+      started: false,
+      reason: "The library is already indexing",
+      indexing: indexState,
+    });
+  }
+  if (isTaskRunning()) {
+    return fail(
+      res,
+      409,
+      "Wait for the current long-running task to finish before rescanning",
+    );
+  }
   scanMedia().catch(() => undefined);
-  res.json({ ok: true, indexing: indexState });
+  res.json({ ok: true, started: true, indexing: indexState });
 });
 
 router.get("/batch/today", (req, res) => {
@@ -251,15 +298,17 @@ router.get("/files", (req, res) => {
     key: typeof req.query.key === "string" ? req.query.key : undefined,
     value: typeof req.query.value === "string" ? req.query.value : undefined,
     cursor,
-    limit,
+    limit: limit + 1,
     sort:
       req.query.sort === "oldest" || req.query.sort === "name"
         ? req.query.sort
         : "newest",
   });
+  const page = rows.slice(0, limit);
   res.json({
-    files: rows.map((row) => summaryFromRow(row)),
-    cursor: rows.at(-1)?.id ?? null,
+    files: page.map((row) => summaryFromRow(row)),
+    cursor: page.at(-1)?.id ?? null,
+    hasMore: rows.length > limit,
   });
 });
 
@@ -376,13 +425,12 @@ router.post("/tags/rename", async (req, res) => {
   const parsed = renameSchema.safeParse(req.body);
   if (!parsed.success) return fail(res, 400, "Invalid request");
   try {
-    res.json({
-      updated: await renameTagValue(
-        parsed.data.key,
-        parsed.data.from,
-        parsed.data.to,
-      ),
-    });
+    const result = await renameTagValue(
+      parsed.data.key,
+      parsed.data.from,
+      parsed.data.to,
+    );
+    res.status(result.started ? 200 : 409).json(result);
   } catch (error) {
     fail(res, 400, error instanceof Error ? error.message : "Rename failed");
   }
@@ -408,9 +456,8 @@ const removeSchema = z.object({ key: z.string(), value: z.string() });
 router.post("/tags/remove", async (req, res) => {
   const parsed = removeSchema.safeParse(req.body);
   if (!parsed.success) return fail(res, 400, "Invalid request");
-  res.json({
-    updated: await removeTagEverywhere(parsed.data.key, parsed.data.value),
-  });
+  const result = await removeTagEverywhere(parsed.data.key, parsed.data.value);
+  res.status(result.started ? 200 : 409).json(result);
 });
 
 router.get("/stats", (_req, res) => {
@@ -422,11 +469,11 @@ router.get("/migration", (_req, res) => {
 });
 
 router.post("/migration/scan", (_req, res) => {
-  try {
-    res.json({ state: scanMigration(), rows: getMigrationRows() });
-  } catch (error) {
-    fail(res, 400, error instanceof Error ? error.message : "Scan failed");
-  }
+  const result = startMigrationScan();
+  res.status(result.started ? 200 : 409).json({
+    ...result,
+    rows: getMigrationRows(),
+  });
 });
 
 const mappingSchema = z.object({
@@ -461,7 +508,9 @@ router.post("/migration/apply", (req, res) => {
   const parsed = applyMigrationSchema.safeParse(req.body ?? {});
   if (!parsed.success) return fail(res, 400, "Invalid request");
   const result = applyMigration(parsed.data);
-  res.json({ ...result, rows: getMigrationRows() });
+  res
+    .status(result.started ? 200 : 409)
+    .json({ ...result, rows: getMigrationRows() });
 });
 
 router.get("/migration/state", (_req, res) => {
@@ -546,7 +595,6 @@ const clusterLabelSchema = z.object({
 router.post("/faces/clusters/label", async (req, res) => {
   const parsed = clusterLabelSchema.safeParse(req.body);
   if (!parsed.success) return fail(res, 400, "Invalid request");
-  res.json({
-    updated: await labelCluster(parsed.data.faceIds, parsed.data.person),
-  });
+  const result = await labelCluster(parsed.data.faceIds, parsed.data.person);
+  res.status(result.started ? 200 : 409).json(result);
 });

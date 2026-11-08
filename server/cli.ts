@@ -18,7 +18,7 @@ function print(value: unknown) {
 
 async function main() {
   if (command === "scan") {
-    const state = scanMigration();
+    const state = await scanMigration();
     print({ state, rows: getMigrationRows() });
     return;
   }

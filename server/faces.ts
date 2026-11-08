@@ -3,7 +3,7 @@ import path from "node:path";
 import util from "node:util";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
-import { hasLegacyTags } from "../shared/tag-format";
+import { hasLegacyTags, valueNorm } from "../shared/tag-format";
 import type { Face } from "../shared/types";
 import { config, serverLog } from "./config";
 import {
@@ -16,6 +16,7 @@ import {
   getSetting,
   labeledFaces,
   markFacesFailed,
+  removeTagFromFileIfSource,
   replaceFacesForFile,
   setFaceLabel,
   tagsForFile,
@@ -24,6 +25,7 @@ import {
 } from "./db";
 import { absolutePathFor, getPreview } from "./media";
 import { writeMetadata } from "./metadata";
+import { beginTask, finishTask, isTaskRunning, updateTask } from "./tasks";
 
 type HumanFace = {
   box: [number, number, number, number];
@@ -165,6 +167,7 @@ function embeddingToArray(buffer: Uint8Array): number[] {
 
 export async function processFacesForFile(file: FileRow): Promise<void> {
   if (!facesAvailable()) return;
+  if (isTaskRunning()) return;
   if (file.faces_processed !== 0) return;
   const human = await getHuman();
   if (!human) {
@@ -317,21 +320,36 @@ export async function labelFace(
   faceId: number,
   person: string | null,
 ): Promise<{ fileId: number } | null> {
+  if (isTaskRunning())
+    throw new Error("Wait for the current task to finish before labeling");
+  const previous = faceForId(faceId)?.label ?? null;
   const result = setFaceLabel(faceId, person);
   if (!result) return null;
   if (person) {
     addTagToFile(result.fileId, { key: "people", value: person }, "face");
-    await persistFileTags(result.fileId);
   }
+  if (previous && (!person || valueNorm(previous) !== valueNorm(person))) {
+    const stillUsed = facesForFile(result.fileId).some(
+      (face) => face.id !== faceId && face.label === previous,
+    );
+    if (!stillUsed) {
+      removeTagFromFileIfSource(
+        result.fileId,
+        { key: "people", value: previous },
+        "face",
+      );
+    }
+  }
+  if (person || previous) await persistFileTags(result.fileId);
   invalidateKnownFaces();
   return { fileId: result.fileId };
 }
 
-async function persistFileTags(fileId: number): Promise<void> {
+async function persistFileTags(fileId: number): Promise<boolean> {
   const row = fileRowById(fileId);
-  if (!row) return;
+  if (!row) return false;
   const absolute = absolutePathFor(row);
-  if (!absolute) return;
+  if (!absolute) return false;
   const tags = tagsForFile(fileId);
   try {
     const written = await writeMetadata({
@@ -351,9 +369,28 @@ async function persistFileTags(fileId: number): Promise<void> {
       localDate: written.localDate ?? row.local_date,
       legacyPending: hasLegacyTags(row.name, row.description ?? ""),
     });
+    return true;
   } catch (error) {
     serverLog.warn("face tag metadata write failed", row.path, error);
+    return false;
   }
+}
+
+async function persistLabeledFiles(
+  fileIds: number[],
+  label: string,
+): Promise<void> {
+  let errors = 0;
+  for (let index = 0; index < fileIds.length; index++) {
+    const ok = await persistFileTags(fileIds[index]!);
+    if (!ok) errors++;
+    updateTask({ processed: index + 1, errors });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  finishTask(
+    errors,
+    `${label}: ${fileIds.length} file${fileIds.length === 1 ? "" : "s"}, ${errors} error${errors === 1 ? "" : "s"}`,
+  );
 }
 
 export function peopleList(): {
@@ -407,7 +444,7 @@ export type FaceCluster = {
 };
 
 export function unknownFaceClusters(): FaceCluster[] {
-  const unknown = unknownFaces().slice(0, 800);
+  const unknown = unknownFaces();
   const clusters: { embeddings: number[][]; faces: FaceRow[] }[] = [];
   for (const face of unknown) {
     const embedding = embeddingToArray(face.embedding);
@@ -443,21 +480,57 @@ export function unknownFaceClusters(): FaceCluster[] {
     }));
 }
 
+export type LabelClusterResult = {
+  started: boolean;
+  updated: number;
+  reason?: string;
+};
+
 export async function labelCluster(
   faceIds: number[],
   person: string,
-): Promise<number> {
+): Promise<LabelClusterResult> {
+  if (isTaskRunning()) {
+    return {
+      started: false,
+      updated: 0,
+      reason: "Wait for the current task to finish",
+    };
+  }
+  if (!beginTask("cluster-label", 0, `Naming faces as ${person}`)) {
+    return {
+      started: false,
+      updated: 0,
+      reason: "Wait for the current task to finish",
+    };
+  }
   let updated = 0;
   const touched = new Set<number>();
-  for (const faceId of faceIds) {
-    const face = faceForId(faceId);
-    if (!face) continue;
-    setFaceLabel(faceId, person);
-    addTagToFile(face.file_id, { key: "people", value: person }, "face");
-    touched.add(face.file_id);
-    updated++;
+  try {
+    for (const faceId of faceIds) {
+      const face = faceForId(faceId);
+      if (!face) continue;
+      setFaceLabel(faceId, person);
+      addTagToFile(face.file_id, { key: "people", value: person }, "face");
+      touched.add(face.file_id);
+      updated++;
+    }
+  } catch (error) {
+    finishTask(
+      1,
+      `Naming failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw error;
   }
-  for (const fileId of touched) await persistFileTags(fileId);
   invalidateKnownFaces();
-  return updated;
+  if (touched.size === 0) {
+    finishTask(0, "No matching faces were labeled");
+  } else {
+    updateTask({ total: touched.size, processed: 0 });
+    void persistLabeledFiles(
+      Array.from(touched),
+      `Named ${updated} face${updated === 1 ? "" : "s"}`,
+    );
+  }
+  return { started: true, updated };
 }

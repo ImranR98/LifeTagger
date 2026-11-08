@@ -24,8 +24,8 @@ export default function App() {
     );
   }
 
-  if (status.isError) {
-    const authRequired = status.error instanceof AuthRequiredError;
+  const authRequired = status.error instanceof AuthRequiredError;
+  if (status.isError && (!status.data || authRequired)) {
     return (
       <div className="flex min-h-screen items-center justify-center p-5">
         <div className="card max-w-md p-6 text-center">

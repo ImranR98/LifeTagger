@@ -37,9 +37,12 @@ export default function SettingsPage() {
     faceScanMode: "on-demand" | "background";
   } | null>(null);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(
     null,
   );
+  const indexing = status.data?.indexing.running ?? false;
+  const taskRunning = Boolean(status.data?.task?.running);
 
   useEffect(() => {
     if (!settings.data || form) return;
@@ -55,8 +58,11 @@ export default function SettingsPage() {
   }, [settings.data, form]);
 
   useEffect(() => {
+    const captured = window.__lifetaggerInstallPrompt;
+    if (captured) setInstallPrompt(captured as InstallPromptEvent);
     const listener = (event: Event) => {
       event.preventDefault();
+      window.__lifetaggerInstallPrompt = event;
       setInstallPrompt(event as InstallPromptEvent);
     };
     window.addEventListener("beforeinstallprompt", listener);
@@ -66,6 +72,7 @@ export default function SettingsPage() {
   const save = useMutation({
     mutationFn: () => api.updateSettings(form!),
     onSuccess: () => {
+      setError(null);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
       client.invalidateQueries({ queryKey: ["settings"] });
@@ -73,16 +80,62 @@ export default function SettingsPage() {
       client.invalidateQueries({ queryKey: ["batch"] });
       client.invalidateQueries({ queryKey: ["files"] });
     },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not save settings",
+      ),
   });
 
   const rescan = useMutation({
     mutationFn: api.rescan,
-    onSuccess: () => {
+    onSuccess: (result) => {
+      if (result.started === false) {
+        setError(result.reason ?? "The rescan did not start");
+      } else {
+        setError(null);
+      }
       client.invalidateQueries({ queryKey: ["status"] });
     },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not start the rescan",
+      ),
   });
 
+  if (settings.isError && !settings.data) {
+    return (
+      <div className="card p-6">
+        <h1 className="text-lg font-semibold">Settings could not be loaded</h1>
+        <p className="mt-2 text-sm text-slate-400">
+          {settings.error instanceof Error
+            ? settings.error.message
+            : "The server did not respond."}
+        </p>
+        <button className="btn mt-4" onClick={() => settings.refetch()}>
+          Try again
+        </button>
+      </div>
+    );
+  }
+
   if (!form) return <div className="skeleton h-96 rounded-3xl" />;
+
+  const formInvalid =
+    !form.mediaRoot.trim() ||
+    !Number.isFinite(form.dailyGoal) ||
+    form.dailyGoal < 1 ||
+    form.dailyGoal > 100 ||
+    !Number.isFinite(form.suggestionRadiusM) ||
+    form.suggestionRadiusM < 50 ||
+    form.suggestionRadiusM > 20_000 ||
+    !form.reminderTime ||
+    !form.timezone.trim();
+  const rootChanged =
+    form.mediaRoot.trim() !== (settings.data?.mediaRoot ?? "").trim();
 
   return (
     <div className="space-y-5">
@@ -100,6 +153,7 @@ export default function SettingsPage() {
           <input
             className="input"
             value={form.mediaRoot}
+            disabled={indexing || taskRunning}
             onChange={(event) =>
               setForm({ ...form, mediaRoot: event.target.value })
             }
@@ -109,6 +163,8 @@ export default function SettingsPage() {
             In the container this is normally{" "}
             <code className="text-slate-400">/media</code>; pick a subfolder if
             you only want part of the tree.
+            {indexing &&
+              " The folder cannot be changed while the library is indexing."}
           </span>
         </label>
         <div className="grid gap-3 sm:grid-cols-2">
@@ -168,7 +224,11 @@ export default function SettingsPage() {
           <button
             className="btn btn-primary"
             onClick={() => save.mutate()}
-            disabled={save.isPending}
+            disabled={
+              save.isPending ||
+              formInvalid ||
+              ((indexing || taskRunning) && rootChanged)
+            }
           >
             {save.isPending ? (
               <Loader2 size={16} className="animate-spin" />
@@ -180,19 +240,31 @@ export default function SettingsPage() {
           <button
             className="btn"
             onClick={() => rescan.mutate()}
-            disabled={rescan.isPending}
+            disabled={rescan.isPending || indexing || taskRunning}
+            title={
+              indexing
+                ? "Wait for the current index to finish"
+                : taskRunning
+                  ? "Wait for the running task to finish"
+                  : undefined
+            }
           >
-            {rescan.isPending ? (
+            {rescan.isPending || indexing ? (
               <Loader2 size={16} className="animate-spin" />
             ) : (
               <RefreshCw size={16} />
             )}
-            Rescan library
+            {indexing ? "Indexing…" : "Rescan library"}
           </button>
           {saved && (
             <span className="self-center text-sm text-teal-300">Saved.</span>
           )}
         </div>
+        {error && (
+          <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">
+            {error}
+          </div>
+        )}
         {status.data?.indexing.running && (
           <p className="text-xs text-amber-300">
             Indexing {status.data.indexing.scanned}/{status.data.indexing.total}{" "}
@@ -287,6 +359,7 @@ export default function SettingsPage() {
           className="btn btn-primary w-full"
           onClick={async () => {
             await installPrompt.prompt();
+            window.__lifetaggerInstallPrompt = undefined;
             setInstallPrompt(null);
           }}
         >

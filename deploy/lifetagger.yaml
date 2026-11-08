@@ -95,6 +95,7 @@ spec:
       containers:
         - name: lifetagger
           image: ghcr.io/imranr98/lifetagger:latest@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
           securityContext:
             {{- include "dscpln.containerSecurityContext" (dict "uid" .Values.MY_UID "readOnlyRootFilesystem" true) | nindent 12 }}
           ports:
@@ -119,10 +120,14 @@ spec:
               value: "true"
             - name: FACE_SCAN_MODE
               value: "on-demand"
+            - name: INDEX_CONCURRENCY
+              value: "2"
             - name: EXTRA_IMAGE_EXT
               value: '{{ .Values.LIFETAGGER_EXTRA_IMAGE_EXT | default "" }}'
             - name: EXTRA_VIDEO_EXT
               value: '{{ .Values.LIFETAGGER_EXTRA_VIDEO_EXT | default "" }}'
+            - name: EXCLUDE_EXT
+              value: '{{ .Values.LIFETAGGER_EXCLUDE_EXT | default "txt,pp3,json,xmp,aae,db,ini,log" }}'
             - name: VAPID_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:
@@ -159,6 +164,9 @@ spec:
               mountPath: /data
             - name: media
               mountPath: /media
+              # The Media PV is shared with Immich. LifeTagger only sees and
+              # tags the Camera subtree.
+              subPath: Camera
             - name: tmp
               mountPath: /tmp
       volumes:

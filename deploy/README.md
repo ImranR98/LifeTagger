@@ -48,6 +48,8 @@ LIFETAGGER_VAPID_SUBJECT: "mailto:you@example.com"
 # Optional: extra extensions for unusual formats (comma-separated).
 LIFETAGGER_EXTRA_IMAGE_EXT: ""
 LIFETAGGER_EXTRA_VIDEO_EXT: ""
+# Optional: extensions omitted from indexing.
+LIFETAGGER_EXCLUDE_EXT: "txt,pp3,json,xmp,aae,db,ini,log"
 ```
 
 `lifetagger` must be in `PUBLIC_HOSTS` so it is included in the edge
@@ -74,8 +76,13 @@ if you would rather keep the usual country allowlist.
 ```bash
 cd ~/Main/Infra
 bash scripts/validate.sh srv0
-bash scripts/deploy.sh srv0
+helm upgrade --install srv0-apps targets/srv0/k3s-apps -n apps \
+  -f targets/srv0/k3s-apps/values.yaml \
+  -f config/srv0/values.yaml
 ```
+
+Prefer this app-only upgrade for LifeTagger changes. A full `deploy.sh srv0`
+also updates base components and can invalidate Authelia sessions.
 
 Then open `https://lifetagger.<SERVICES_DOMAIN>`, authenticate with Authelia,
 choose the media subtree (usually `/media`), and let the background index run.
@@ -83,8 +90,10 @@ choose the media subtree (usually `/media`), and let the background index run.
 ## Storage and permissions
 
 - Media: existing `hostpath-main-node-media-pvc`, mounted read-write at
-  `/media`. The container runs as `MY_UID`; that user must own/write the media
-  files. Never run a recursive `chown` on the media tree.
+  `/media` with `subPath: Camera`. Keep that subPath; LifeTagger must not walk
+  or index the rest of the shared media tree. The container runs as `MY_UID`;
+  that user must own/write the media files. Never run a recursive `chown` on
+  the media tree.
 - App data: `lifetagger-data-pvc` on `nfs-apps`, 50 GiB. It holds the SQLite
   index, thumbnails, previews, face models, metadata backups, and DB snapshots.
   The PVC is labelled `auto-backup`; thumbnails, previews, and models are

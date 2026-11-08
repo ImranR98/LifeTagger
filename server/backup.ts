@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { config, serverLog } from "./config";
 import { indexState } from "./indexer";
+import { isTaskRunning } from "./tasks";
 
 const execFileAsync = promisify(execFile);
 let snapshotTimer: NodeJS.Timeout | null = null;
@@ -19,7 +20,7 @@ db.close();
 `;
 
 export async function createDbSnapshot(): Promise<string | null> {
-  if (indexState.running) return null;
+  if (indexState.running || isTaskRunning()) return null;
   try {
     fs.mkdirSync(config.dbSnapshotsDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -51,7 +52,7 @@ export async function createDbSnapshot(): Promise<string | null> {
 
 function scheduleSnapshot(delay: number): void {
   snapshotTimer = setTimeout(async () => {
-    if (indexState.running) {
+    if (indexState.running || isTaskRunning()) {
       scheduleSnapshot(SNAPSHOT_RETRY_MS);
       return;
     }
