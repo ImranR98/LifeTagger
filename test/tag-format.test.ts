@@ -95,6 +95,14 @@ test("detects legacy tags without misreading normal prose", () => {
   );
 });
 
+test("does not backtrack on long prose descriptions", () => {
+  const pathological = "a".repeat(50_000) + "!";
+  assert.deepEqual(splitLegacyDescription(pathological), {
+    tags: [],
+    description: pathological,
+  });
+});
+
 test("only splits old tag prefixes from descriptions", () => {
   assert.deepEqual(splitLegacyDescription("beach, sun. A day at the beach"), {
     tags: ["beach", "sun"],

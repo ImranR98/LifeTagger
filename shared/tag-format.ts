@@ -127,9 +127,6 @@ export function parseLegacyFilename(filename: string): LegacyFilename | null {
   };
 }
 
-const LEGACY_DESCRIPTION_RE =
-  /^((?:[A-Za-z0-9_-]+(?:\s*,\s*)?)+)\.\s+([\s\S]*)$/;
-
 /** Split the old `${tags}. ${description}` convention without touching normal prose.
  * A single bare word is only treated as a tag when `allowSingle` is set (e.g. when the
  * filename also carries the legacy suffix). */
@@ -139,14 +136,20 @@ export function splitLegacyDescription(
 ): { tags: string[]; description: string } {
   const trimmed = description.trim();
   if (!trimmed) return { tags: [], description: "" };
-  const match = LEGACY_DESCRIPTION_RE.exec(trimmed);
-  if (!match) return { tags: [], description: trimmed };
-  const [, rawTags = "", rest = ""] = match;
-  const tags = rawTags
-    .split(",")
-    .map((tag) => normalizeValue(tag))
-    .filter((tag) => /^[A-Za-z0-9_-]+$/.test(tag));
-  if (tags.length === 0) return { tags: [], description: trimmed };
+  // Find the first sentence boundary without a regex that can backtrack over
+  // an arbitrary prose prefix (the old pattern could freeze on long notes).
+  const separator = /\.\s/.exec(trimmed);
+  if (!separator) return { tags: [], description: trimmed };
+  const rawTags = trimmed.slice(0, separator.index).trim();
+  const rest = trimmed.slice(separator.index + 1).trim();
+  const parts = rawTags.split(",").map((tag) => normalizeValue(tag));
+  if (
+    parts.length === 0 ||
+    !parts.every((tag) => /^[A-Za-z0-9_-]+$/.test(tag))
+  ) {
+    return { tags: [], description: trimmed };
+  }
+  const tags = parts;
   if (tags.length === 1 && !rawTags.includes(",") && !options.allowSingle) {
     return { tags: [], description: trimmed };
   }
