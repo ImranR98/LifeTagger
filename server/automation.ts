@@ -19,7 +19,12 @@ import {
 } from "./db";
 import { absolutePathFor } from "./media";
 import { writeMetadata } from "./metadata";
-import { embeddingToArray, facesAvailable, processFacesForFile } from "./faces";
+import {
+  embeddingToArray,
+  facesAvailable,
+  invalidateKnownFaces,
+  processFacesForFile,
+} from "./faces";
 import { indexState } from "./indexer";
 import {
   beginTask,
@@ -566,6 +571,7 @@ async function runFaceAutomation(): Promise<void> {
       if (!(await persistFileTags(fileId))) counts.errors++;
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
+    invalidateKnownFaces();
     finishTask(
       counts.errors,
       `Faces: ${counts.auto} auto-tagged, ${counts.review} review suggestions`,
@@ -894,6 +900,7 @@ async function runReviewApproval(
     for (const fileId of filesToPersist) {
       if (!(await persistFileTags(fileId))) counts.errors++;
     }
+    invalidateKnownFaces();
     finishTask(
       counts.errors,
       `Review: ${rows.length - counts.errors} applied, ${counts.errors} errors`,
@@ -912,7 +919,9 @@ export function confirmAutoTag(
   key: string,
   value: string,
 ): boolean {
-  return promoteFileTagSource(fileId, key, value, "review");
+  const promoted = promoteFileTagSource(fileId, key, value, "review");
+  if (promoted) invalidateKnownFaces();
+  return promoted;
 }
 
 export function automationRunCounts(): {

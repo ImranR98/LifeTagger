@@ -6,7 +6,10 @@ import type { Tag } from "../shared/types";
 import { isValidTag } from "../shared/tag-format";
 import { config, isWithinAllowedRoots } from "./config";
 import {
+  countAutoOnlyFiles,
   countFiles,
+  countManuallyTaggedFiles,
+  countNeedsReviewFiles,
   db,
   faceCount,
   fileRowById,
@@ -38,6 +41,7 @@ import {
   updateKey,
 } from "./tags";
 import {
+  appendAutoOnlyCandidates,
   extendBatch,
   getOrCreateBatch,
   markBatchItem,
@@ -128,11 +132,16 @@ router.get("/status", (_req, res) => {
     indexing: indexState,
     counts: {
       files: countFiles(),
+      indexed: countFiles(),
       tagged,
+      manuallyTagged: countManuallyTaggedFiles(),
+      autoOnly: countAutoOnlyFiles(),
       untagged: untaggedCount(),
+      needsReview: countNeedsReviewFiles(),
       legacyPending: countFiles({ legacyPending: true }),
       faces: faceCount(),
     },
+    reviewAutoTagged: getSetting("reviewAutoTagged") !== "false",
     versions: { app: config.appVersion, exiftool: "bundled" },
     facesEnabled: facesAvailable(),
     task: getTask(),
@@ -183,6 +192,7 @@ const settingsSchema = z.object({
   faceMinQuality: z.number().min(0).max(1).optional(),
   placeAutoRadiusM: z.number().int().min(1).max(20_000).optional(),
   placeReviewRadiusM: z.number().int().min(10).max(50_000).optional(),
+  reviewAutoTagged: z.boolean().optional(),
 });
 
 router.get("/settings", (_req, res) => {
@@ -210,6 +220,7 @@ router.get("/settings", (_req, res) => {
     placeReviewRadiusM: Number(
       settings.placeReviewRadiusM ?? config.placeReviewRadiusM,
     ),
+    reviewAutoTagged: settings.reviewAutoTagged !== "false",
     pushConfigured: pushConfigured(),
     publicUrl: config.publicUrl,
   });
@@ -281,6 +292,12 @@ router.patch("/settings", (req, res) => {
     setSetting("placeAutoRadiusM", String(input.placeAutoRadiusM));
   if (input.placeReviewRadiusM !== undefined)
     setSetting("placeReviewRadiusM", String(input.placeReviewRadiusM));
+  if (input.reviewAutoTagged !== undefined) {
+    const wasEnabled = getSetting("reviewAutoTagged") !== "false";
+    setSetting("reviewAutoTagged", input.reviewAutoTagged ? "true" : "false");
+    if (input.reviewAutoTagged && !wasEnabled)
+      appendAutoOnlyCandidates(today());
+  }
   if (rootChanged) scanMedia().catch(() => undefined);
   res.json({ ok: true });
 });

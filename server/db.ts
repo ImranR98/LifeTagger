@@ -311,6 +311,7 @@ export function ensureDefaults(): void {
     faceMinQuality: String(config.faceMinQuality),
     placeAutoRadiusM: String(config.placeAutoRadiusM),
     placeReviewRadiusM: String(config.placeReviewRadiusM),
+    reviewAutoTagged: "true",
   };
   for (const [key, value] of Object.entries(defaults)) {
     if (getSetting(key) === null) setSetting(key, value);
@@ -680,6 +681,65 @@ export function nextScanGeneration(): number {
   return row.value;
 }
 
+export function countManuallyTaggedFiles(): number {
+  return (
+    statement(
+      "SELECT COUNT(DISTINCT ft.file_id) AS count FROM file_tags ft WHERE ft.source NOT IN ('face-auto', 'place-auto')",
+    ).get() as { count: number }
+  ).count;
+}
+
+export function countAutoOnlyFiles(): number {
+  return (
+    statement(
+      `SELECT COUNT(*) AS count FROM files f
+       WHERE EXISTS (
+         SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id
+           AND ft.source IN ('face-auto', 'place-auto')
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id
+           AND ft.source NOT IN ('face-auto', 'place-auto')
+       )`,
+    ).get() as { count: number }
+  ).count;
+}
+
+export function countNeedsReviewFiles(): number {
+  return (
+    statement(
+      `SELECT COUNT(*) AS count FROM files f
+       WHERE f.legacy_pending = 0
+         AND NOT EXISTS (
+           SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id
+             AND ft.source NOT IN ('face-auto', 'place-auto')
+         )`,
+    ).get() as { count: number }
+  ).count;
+}
+
+export function fileIsAutoOnly(fileId: number): boolean {
+  const rows = statement("SELECT source FROM file_tags WHERE file_id = ?").all(
+    fileId,
+  ) as { source: string }[];
+  return (
+    rows.length > 0 &&
+    rows.every(
+      (row) => row.source === "face-auto" || row.source === "place-auto",
+    )
+  );
+}
+
+export function promoteAutoTagsForFile(fileId: number): number {
+  const result = statement(
+    "UPDATE file_tags SET source = 'review' WHERE file_id = ? AND source IN ('face-auto', 'place-auto')",
+  ).run(fileId);
+  statement(
+    "UPDATE faces SET label_source = 'review' WHERE file_id = ? AND label_source = 'face-auto'",
+  ).run(fileId);
+  return Number(result.changes);
+}
+
 export function countFiles(filter?: {
   untagged?: boolean;
   legacyPending?: boolean;
@@ -854,9 +914,16 @@ export function batchItems(
   }[];
 }
 
+function candidateTagCondition(includeAuto: boolean): string {
+  return includeAuto
+    ? "NOT EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id AND ft.source NOT IN ('face-auto', 'place-auto'))"
+    : "NOT EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id)";
+}
+
 export function untaggedCandidateRows(
   limit: number,
   excludeIds: number[] = [],
+  includeAuto = true,
 ): FileRow[] {
   const placeholders = excludeIds.map(() => "?").join(",");
   const exclusion = excludeIds.length
@@ -865,7 +932,7 @@ export function untaggedCandidateRows(
   return statement(
     `SELECT f.* FROM files f
      WHERE f.legacy_pending = 0
-       AND NOT EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id)
+       AND ${candidateTagCondition(includeAuto)}
        ${exclusion}
      ORDER BY COALESCE(f.capture_at, f.indexed_at) ASC, f.id ASC
      LIMIT ?`,
@@ -876,6 +943,7 @@ export function candidateRowsForBatch(
   seed: FileRow,
   limit: number,
   excludeIds: number[] = [],
+  includeAuto = true,
 ): FileRow[] {
   const placeholders = excludeIds.map(() => "?").join(",");
   const exclusion = excludeIds.length
@@ -885,7 +953,7 @@ export function candidateRowsForBatch(
   if (seed.local_date) {
     rows.push(
       ...(statement(
-        `SELECT f.* FROM files f WHERE f.legacy_pending = 0 AND f.local_date = ? AND f.id <> ? AND NOT EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id) ${exclusion} LIMIT ?`,
+        `SELECT f.* FROM files f WHERE f.legacy_pending = 0 AND f.local_date = ? AND f.id <> ? AND ${candidateTagCondition(includeAuto)} ${exclusion} LIMIT ?`,
       ).all(seed.local_date, seed.id, ...excludeIds, limit) as FileRow[]),
     );
   }
@@ -893,12 +961,37 @@ export function candidateRowsForBatch(
     const remaining = limit - rows.length;
     rows.push(
       ...(statement(
-        `SELECT f.* FROM files f WHERE f.legacy_pending = 0 AND f.folder = ? AND f.id <> ? AND NOT EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id) ${exclusion} LIMIT ?`,
+        `SELECT f.* FROM files f WHERE f.legacy_pending = 0 AND f.folder = ? AND f.id <> ? AND ${candidateTagCondition(includeAuto)} ${exclusion} LIMIT ?`,
       ).all(seed.folder, seed.id, ...excludeIds, remaining) as FileRow[]),
     );
   }
   const unique = new Map(rows.map((row) => [row.id, row]));
   return Array.from(unique.values()).slice(0, limit);
+}
+
+export function autoOnlyCandidateRows(
+  limit: number,
+  excludeIds: number[] = [],
+): FileRow[] {
+  const placeholders = excludeIds.map(() => "?").join(",");
+  const exclusion = excludeIds.length
+    ? `AND f.id NOT IN (${placeholders})`
+    : "";
+  return statement(
+    `SELECT f.* FROM files f
+     WHERE f.legacy_pending = 0
+       AND EXISTS (
+         SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id
+           AND ft.source IN ('face-auto', 'place-auto')
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id
+           AND ft.source NOT IN ('face-auto', 'place-auto')
+       )
+       ${exclusion}
+     ORDER BY COALESCE(f.capture_at, f.indexed_at) ASC, f.id ASC
+     LIMIT ?`,
+  ).all(...excludeIds, limit) as FileRow[];
 }
 
 export function nearbyFileRows(
@@ -1136,6 +1229,8 @@ export function last30DaysActivity(): { date: string; done: number }[] {
 
 export function statsTotals(): {
   totalTagged: number;
+  totalManuallyTagged: number;
+  totalAutoOnly: number;
   totalFiles: number;
   legacyPending: number;
 } {
@@ -1152,7 +1247,13 @@ export function statsTotals(): {
       "SELECT COUNT(*) AS count FROM files WHERE legacy_pending = 1",
     ).get() as { count: number }
   ).count;
-  return { totalTagged, totalFiles, legacyPending };
+  return {
+    totalTagged,
+    totalManuallyTagged: countManuallyTaggedFiles(),
+    totalAutoOnly: countAutoOnlyFiles(),
+    totalFiles,
+    legacyPending,
+  };
 }
 
 export function topKeys(limit = 8): { key: string; count: number }[] {

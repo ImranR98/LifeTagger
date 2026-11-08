@@ -17,6 +17,7 @@ import {
   tagsForFile,
   updateFileAfterWrite,
   updateFts,
+  promoteAutoTagsForFile,
   recordUndo,
   undoEntry,
   markUndone,
@@ -29,6 +30,7 @@ import { absolutePathFor } from "./media";
 import { writeMetadata } from "./metadata";
 import {
   faceListForFile,
+  invalidateKnownFaces,
   queueFaceProcessing,
   syncFaceLabelForFile,
 } from "./faces";
@@ -98,6 +100,7 @@ export async function saveFileTags(
     localDate: written.localDate ?? row.local_date,
     legacyPending: hasLegacyTags(row.name, description),
   });
+  if (promoteAutoTagsForFile(fileId) > 0) invalidateKnownFaces();
   const undoId = recordUndo(
     fileId,
     previousTags,

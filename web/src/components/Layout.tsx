@@ -100,7 +100,9 @@ export function Layout({ children }: { children: ReactNode }) {
         ))}
         <div className="mt-auto px-2 text-[11px] text-slate-500">
           {status.data?.counts.tagged ?? 0} tagged ·{" "}
-          {status.data?.counts.files ?? 0} indexed
+          {status.data?.counts.manuallyTagged ?? 0} manual ·{" "}
+          {status.data?.counts.indexed ?? status.data?.counts.files ?? 0}{" "}
+          indexed
         </div>
       </aside>
       <div className="with-sidebar">
@@ -119,7 +121,9 @@ export function Layout({ children }: { children: ReactNode }) {
               </span>
             ) : (
               <span className="text-xs text-slate-500">
-                {status.data?.counts.untagged ?? 0} untagged
+                {status.data?.counts.manuallyTagged ?? 0} manual ·{" "}
+                {status.data?.counts.indexed ?? status.data?.counts.files ?? 0}{" "}
+                indexed
               </span>
             )}
             <Link

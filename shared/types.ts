@@ -73,6 +73,8 @@ export type StatsResponse = {
   streak: number;
   longestStreak: number;
   totalTagged: number;
+  totalManuallyTagged: number;
+  totalAutoOnly: number;
   totalFiles: number;
   indexedFiles: number;
   pendingBatches: number;
@@ -140,11 +142,16 @@ export type StatusResponse = {
   };
   counts: {
     files: number;
+    indexed: number;
     tagged: number;
+    manuallyTagged: number;
+    autoOnly: number;
     untagged: number;
+    needsReview: number;
     legacyPending: number;
     faces: number;
   };
+  reviewAutoTagged: boolean;
   versions: { app: string; exiftool: string };
   facesEnabled: boolean;
   task: TaskState | null;
@@ -163,6 +170,7 @@ export type SettingsResponse = {
   faceMinQuality: number;
   placeAutoRadiusM: number;
   placeReviewRadiusM: number;
+  reviewAutoTagged: boolean;
   pushConfigured: boolean;
   publicUrl: string;
 };

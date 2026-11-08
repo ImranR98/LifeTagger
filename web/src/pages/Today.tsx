@@ -111,6 +111,23 @@ export default function TodayPage() {
     onSuccess: () => client.invalidateQueries({ queryKey: ["batch"] }),
   });
 
+  const toggleAutoReview = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api.updateSettings({ reviewAutoTagged: enabled }),
+    onSuccess: () => {
+      setError(null);
+      client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["status"] });
+      client.invalidateQueries({ queryKey: ["stats"] });
+    },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not update auto-tag review",
+      ),
+  });
+
   const confirmTag = useMutation({
     mutationFn: (tag: Tag) => api.confirmTag(item!.id, tag.key, tag.value),
     onSuccess: () => {
@@ -136,6 +153,14 @@ export default function TodayPage() {
 
   const data = batch.data!;
   const progress = data.total ? Math.round((data.done / data.total) * 100) : 0;
+  const reviewAuto = status.data?.reviewAutoTagged ?? true;
+  const autoOnly =
+    Boolean(item?.tags.length) &&
+    Boolean(
+      item?.tags.every(
+        (tag) => tag.source === "face-auto" || tag.source === "place-auto",
+      ),
+    );
 
   if (!item) {
     if (status.data?.indexing.running) {
@@ -186,6 +211,22 @@ export default function TodayPage() {
                 ? `${data.done} of ${data.total} photos handled. Your streak is ${stats.data?.streak ?? 0} day${(stats.data?.streak ?? 0) === 1 ? "" : "s"}.`
                 : "There are no untagged files waiting right now. New imports will show up here after indexing."}
           </p>
+          <label className="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs text-slate-500">
+            <input
+              type="checkbox"
+              checked={reviewAuto}
+              disabled={toggleAutoReview.isPending}
+              onChange={(event) =>
+                toggleAutoReview.mutate(event.target.checked)
+              }
+            />
+            Review auto-tagged items
+            {status.data?.counts.autoOnly ? (
+              <span className="pill">
+                {status.data.counts.autoOnly} auto-only
+              </span>
+            ) : null}
+          </label>
           <div className="mt-5 flex flex-wrap justify-center gap-2">
             <button
               className="btn btn-primary"
@@ -238,6 +279,19 @@ export default function TodayPage() {
         <div className="progress-fill" style={{ width: `${progress}%` }} />
       </div>
 
+      <label className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+        <input
+          type="checkbox"
+          checked={reviewAuto}
+          disabled={toggleAutoReview.isPending}
+          onChange={(event) => toggleAutoReview.mutate(event.target.checked)}
+        />
+        Review auto-tagged items
+        {status.data?.counts.autoOnly ? (
+          <span className="pill">{status.data.counts.autoOnly} auto-only</span>
+        ) : null}
+      </label>
+
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
         <div className="space-y-3">
           <MediaViewer
@@ -245,6 +299,12 @@ export default function TodayPage() {
             faces={item.faces}
             onFaceClick={() => navigate(`/file/${item.id}`)}
           />
+          {autoOnly && (
+            <div className="rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-xs text-amber-100">
+              These tags were generated automatically. Saving confirms them as
+              manual tags.
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
             <span className="pill">
               {item.kind === "video" ? "Video" : "Photo"}

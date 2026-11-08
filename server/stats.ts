@@ -61,6 +61,8 @@ export function stats(): StatsResponse {
     streak: streak.current,
     longestStreak: streak.longest,
     totalTagged: totals.totalTagged,
+    totalManuallyTagged: totals.totalManuallyTagged,
+    totalAutoOnly: totals.totalAutoOnly,
     totalFiles: totals.totalFiles,
     indexedFiles: indexed,
     pendingBatches: pending,

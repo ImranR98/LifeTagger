@@ -58,7 +58,7 @@ function knownFaces(): (FaceRow & { file_path: string })[] {
   return knownFaceCache.rows;
 }
 
-function invalidateKnownFaces(): void {
+export function invalidateKnownFaces(): void {
   knownFaceCache = null;
 }
 

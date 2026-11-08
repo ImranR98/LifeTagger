@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Flame, Image, Sparkles, Tag } from "lucide-react";
+import { Flame, Image, Sparkles, Tag, UserCheck } from "lucide-react";
 import { api } from "../api";
 
 function dayKey(date: Date): string {
@@ -35,7 +35,7 @@ export default function StatsPage() {
         </h1>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         <StatCard
           icon={Flame}
           label="Current streak"
@@ -46,6 +46,11 @@ export default function StatsPage() {
           icon={Sparkles}
           label="Tagged files"
           value={String(data.totalTagged)}
+        />
+        <StatCard
+          icon={UserCheck}
+          label="Manually tagged"
+          value={String(data.totalManuallyTagged)}
         />
         <StatCard
           icon={Image}

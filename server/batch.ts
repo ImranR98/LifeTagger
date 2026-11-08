@@ -6,10 +6,12 @@ import type {
 } from "../shared/types";
 import {
   appendBatchItems,
+  autoOnlyCandidateRows,
   batchItems,
   candidateRowsForBatch,
   countFiles,
   createBatch,
+  fileIsAutoOnly,
   fileRowById,
   getBatch,
   getSetting,
@@ -28,12 +30,17 @@ function goal(): number {
   return Number.isFinite(parsed) ? Math.max(1, Math.min(100, parsed)) : 15;
 }
 
+function includeAutoTagged(): boolean {
+  return getSetting("reviewAutoTagged") !== "false";
+}
+
 function chooseCandidates(
   date: string,
   amount: number,
+  includeAuto: boolean,
 ): ReturnType<typeof untaggedCandidateRows> {
   const existing = new Set(batchItems(date).map((item) => item.file_id));
-  const seed = untaggedCandidateRows(1, Array.from(existing))[0];
+  const seed = untaggedCandidateRows(1, Array.from(existing), includeAuto)[0];
   if (!seed) return [];
   const chosen = [seed];
   const chosenIds = new Set([seed.id, ...existing]);
@@ -41,6 +48,7 @@ function chooseCandidates(
     seed,
     amount - 1,
     Array.from(chosenIds),
+    includeAuto,
   );
   for (const row of neighbors) {
     if (chosenIds.has(row.id)) continue;
@@ -49,10 +57,11 @@ function chooseCandidates(
     if (chosen.length >= amount) break;
   }
   if (chosen.length < amount) {
-    for (const row of untaggedCandidateRows(amount - chosen.length, [
-      ...chosenIds,
-      ...existing,
-    ])) {
+    for (const row of untaggedCandidateRows(
+      amount - chosen.length,
+      [...chosenIds, ...existing],
+      includeAuto,
+    )) {
       if (chosenIds.has(row.id)) continue;
       chosen.push(row);
       chosenIds.add(row.id);
@@ -63,9 +72,10 @@ function chooseCandidates(
 }
 
 export function getOrCreateBatch(date = todayKey()): BatchResponse {
+  const includeAuto = includeAutoTagged();
   const existing = getBatch(date);
   if (!existing) {
-    const chosen = chooseCandidates(date, goal());
+    const chosen = chooseCandidates(date, goal(), includeAuto);
     if (chosen.length > 0)
       createBatch(
         date,
@@ -90,7 +100,11 @@ export function getOrCreateBatch(date = todayKey()): BatchResponse {
   const items = batchItems(date);
   const done = items.filter((item) => item.status === "done").length;
   const pending = items.filter((item) => item.status === "pending");
-  const rows = pending
+  const visiblePending = includeAuto
+    ? pending
+    : pending.filter((item) => !fileIsAutoOnly(item.file_id));
+  const hiddenPending = pending.length - visiblePending.length;
+  const rows = visiblePending
     .map((item) => fileRowById(item.file_id))
     .filter((row): row is NonNullable<typeof row> => row !== null);
 
@@ -120,8 +134,8 @@ export function getOrCreateBatch(date = todayKey()): BatchResponse {
     date,
     goal: batch.goal,
     done,
-    total: items.length,
-    caughtUp: pending.length === 0,
+    total: Math.max(done, items.length - hiddenPending),
+    caughtUp: visiblePending.length === 0,
     facesPending,
     items: batchItemsResponse,
   };
@@ -130,13 +144,26 @@ export function getOrCreateBatch(date = todayKey()): BatchResponse {
 export function extendBatch(date = todayKey()): BatchResponse {
   const batch = getBatch(date);
   if (!batch) return getOrCreateBatch(date);
-  const chosen = chooseCandidates(date, goal());
+  const chosen = chooseCandidates(date, goal(), includeAutoTagged());
   if (chosen.length > 0)
     appendBatchItems(
       date,
       chosen.map((row) => row.id),
     );
   return getOrCreateBatch(date);
+}
+
+/** Top up today's batch with auto-only items after re-enabling their review. */
+export function appendAutoOnlyCandidates(date = todayKey()): number {
+  if (!getBatch(date)) return 0;
+  const existing = new Set(batchItems(date).map((item) => item.file_id));
+  const chosen = autoOnlyCandidateRows(goal(), Array.from(existing));
+  if (chosen.length > 0)
+    appendBatchItems(
+      date,
+      chosen.map((row) => row.id),
+    );
+  return chosen.length;
 }
 
 export function markBatchItem(
