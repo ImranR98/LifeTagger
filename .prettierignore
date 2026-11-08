@@ -1,0 +1,10 @@
+node_modules
+web/node_modules
+dist
+web/dist
+.lifetagger
+deploy
+app.env
+.env
+package-lock.json
+web/package-lock.json

@@ -1,2 +1,9 @@
 app.env
 node_modules
+dist
+.lifetagger
+web/dist
+web/node_modules
+web/.vite
+*.log
+.DS_Store

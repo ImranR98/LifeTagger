@@ -1,18 +1,48 @@
 {
   "name": "lifetagger",
-  "version": "1.0.0",
-  "description": "Add searchable tags to your vast media library, one batch at a time.",
-  "main": "main.js",
+  "version": "2.0.0",
+  "description": "Metadata-first media tagging with context suggestions, a daily review habit, and local face recognition.",
+  "private": true,
+  "type": "module",
   "scripts": {
-    "build": "npm run build --prefix ./lt-client",
-    "start": "node index.js"
+    "dev": "concurrently -k -n server,web -c blue,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:web": "npm --prefix web run dev",
+    "build": "npm run build:web && npm run build:server",
+    "build:server": "tsup",
+    "build:web": "npm --prefix web run build",
+    "start": "node dist/index.js",
+    "test": "node --test --import tsx test/*.test.ts",
+    "typecheck": "tsc --noEmit && npm --prefix web run typecheck",
+    "format": "prettier --write \"server/**/*.ts\" \"shared/**/*.ts\" \"web/src/**/*.{ts,tsx,css}\" \"test/**/*.ts\"",
+    "postinstall": "npm --prefix web install --no-audit --no-fund",
+    "migrate:scan": "tsx server/cli.ts scan",
+    "migrate:map": "tsx server/cli.ts map",
+    "migrate:apply": "tsx server/cli.ts apply"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs-node": "^4.22.0",
+    "@vladmandic/human": "^3.3.6",
+    "dotenv": "^17.2.3",
+    "exiftool-vendored": "^39.2.0",
+    "express": "^5.3.0",
+    "sharp": "^0.35.5",
+    "web-push": "^4.0.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "@types/web-push": "^3.6.4",
+    "concurrently": "^9.2.1",
+    "prettier": "^3.9.10",
+    "tsup": "^9.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.0"
   },
   "author": "Imran Remtulla",
-  "license": "ISC",
-  "dependencies": {
-    "dotenv": "^16.0.0",
-    "exiftool-vendored": "^16.0.0",
-    "express": "^4.17.3",
-    "open": "^8.4.0"
-  }
+  "license": "ISC"
 }

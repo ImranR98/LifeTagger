@@ -1,0 +1,216 @@
+# LifeTagger for the srv0 apps chart.
+#
+# Copy this file to:
+#   ~/Main/Infra/targets/srv0/k3s-apps/templates/lifetagger.yaml
+#
+# Then add the values from deploy/README.md to the gitignored
+# config/srv0/values.yaml and run:
+#   bash scripts/validate.sh srv0
+#   bash scripts/deploy.sh srv0
+#
+# The image digest below is a placeholder. Let Renovate pin it after the first
+# publish, or replace it with the digest from:
+#   docker buildx imagetools inspect ghcr.io/imranr98/lifetagger:latest
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: lifetagger-ingress
+  namespace: base
+spec:
+  parentRefs:
+    - name: srv0
+      sectionName: websecure
+    {{- if ne .Values.BOOTSTRAP_PRIVATE_APPS "true" }}
+    - name: srv0
+      sectionName: websecure-proxy
+    {{- end }}
+  hostnames:
+    - lifetagger.{{ .Values.SERVICES_DOMAIN }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        # Deliberately no geoblock: this is a daily habit app and may be used
+        # while travelling. Authelia + CrowdSec still protect it.
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: crowdsec-bouncer
+        - type: ExtensionRef
+          extensionRef:
+            group: traefik.io
+            kind: Middleware
+            name: forwardauth-authelia
+      backendRefs:
+        - name: lifetagger
+          namespace: apps
+          port: 8080
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lifetagger-secrets
+  namespace: apps
+type: Opaque
+stringData:
+  VAPID_PUBLIC_KEY: "{{ .Values.LIFETAGGER_VAPID_PUBLIC_KEY }}"
+  VAPID_PRIVATE_KEY: "{{ .Values.LIFETAGGER_VAPID_PRIVATE_KEY }}"
+  VAPID_SUBJECT: "{{ .Values.LIFETAGGER_VAPID_SUBJECT }}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lifetagger
+  namespace: apps
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: lifetagger
+  template:
+    metadata:
+      labels:
+        app: lifetagger
+      annotations:
+        checksum/lifetagger-secrets: {{ printf "%s|%s|%s" .Values.LIFETAGGER_VAPID_PUBLIC_KEY .Values.LIFETAGGER_VAPID_PRIVATE_KEY .Values.LIFETAGGER_VAPID_SUBJECT | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- include "dscpln.podSecurityContext" (dict "uid" .Values.MY_UID "seType" "spc_t" "seLevel" "s0") | nindent 8 }}
+      initContainers:
+        - name: fix-data-perms
+          image: busybox:1.38
+          command: ["sh", "-c", "mkdir -p /data && chown {{ .Values.MY_UID }}:{{ .Values.MY_UID }} /data"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: lifetagger
+          image: ghcr.io/imranr98/lifetagger:latest@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          securityContext:
+            {{- include "dscpln.containerSecurityContext" (dict "uid" .Values.MY_UID "readOnlyRootFilesystem" true) | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "8080"
+            - name: MEDIA_ROOT
+              value: /media
+            - name: ALLOWED_MEDIA_ROOTS
+              value: /media
+            - name: DATA_DIR
+              value: /data
+            - name: PUBLIC_URL
+              value: "https://lifetagger.{{ .Values.SERVICES_DOMAIN }}"
+            - name: TZ
+              value: "{{ .Values.TZ }}"
+            - name: FACE_ENABLED
+              value: "true"
+            - name: FACE_SCAN_MODE
+              value: "on-demand"
+            - name: EXTRA_IMAGE_EXT
+              value: '{{ .Values.LIFETAGGER_EXTRA_IMAGE_EXT | default "" }}'
+            - name: EXTRA_VIDEO_EXT
+              value: '{{ .Values.LIFETAGGER_EXTRA_VIDEO_EXT | default "" }}'
+            - name: VAPID_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lifetagger-secrets
+                  key: VAPID_PUBLIC_KEY
+            - name: VAPID_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lifetagger-secrets
+                  key: VAPID_PRIVATE_KEY
+            - name: VAPID_SUBJECT
+              valueFrom:
+                secretKeyRef:
+                  name: lifetagger-secrets
+                  key: VAPID_SUBJECT
+          readinessProbe:
+            {{- include "dscpln.readinessProbe" (dict "path" "/api/health" "port" "http" "initialDelaySeconds" 10) | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 60
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 4Gi
+              cpu: "4"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: media
+              mountPath: /media
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: lifetagger-data-pvc
+        - name: media
+          persistentVolumeClaim:
+            claimName: hostpath-main-node-media-pvc
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Mi
+---
+{{ include "dscpln.service" (dict "name" "lifetagger" "port" 8080) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lifetagger-data-pvc
+  namespace: apps
+  labels:
+    auto-backup: "true"
+  annotations:
+    backup.infra/exclude: "thumbs,previews,models"
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: nfs-apps
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-traefik-lifetagger-ingress
+  namespace: apps
+spec:
+  podSelector:
+    matchLabels:
+      app: lifetagger
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: base
+      ports:
+        - protocol: TCP
+          port: 8080
+  policyTypes:
+    - Ingress

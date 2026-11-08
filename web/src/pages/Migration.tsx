@@ -1,0 +1,493 @@
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  AlertTriangle,
+  Check,
+  Download,
+  Loader2,
+  Play,
+  RefreshCw,
+  Save,
+  Upload,
+} from "lucide-react";
+import type { MigrationTagRow } from "@shared/types";
+import { api } from "../api";
+
+type Draft = { key: string; value: string; action: "map" | "skip" };
+
+export default function MigrationPage() {
+  const client = useQueryClient();
+  const migration = useQuery({
+    queryKey: ["migration"],
+    queryFn: api.migration,
+    refetchInterval: (query) =>
+      query.state.data?.state.running ? 1500 : false,
+  });
+  const [drafts, setDrafts] = useState<Record<string, Draft>>({});
+  const [bulkKey, setBulkKey] = useState("");
+  const [strip, setStrip] = useState(true);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const autoScanStarted = useRef(false);
+
+  function exportMapping() {
+    const payload = Object.entries(drafts).map(([legacyValue, draft]) => ({
+      legacyValue,
+      ...draft,
+    }));
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "lifetagger-mapping.json";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importMapping(file: File) {
+    try {
+      const payload = JSON.parse(await file.text()) as {
+        legacyValue: string;
+        key: string;
+        value: string;
+        action: "map" | "skip";
+      }[];
+      const next: Record<string, Draft> = {};
+      for (const entry of payload) {
+        if (!entry.legacyValue) continue;
+        next[entry.legacyValue] = {
+          key: entry.key ?? "",
+          value: entry.value ?? entry.legacyValue,
+          action: entry.action === "skip" ? "skip" : "map",
+        };
+      }
+      setDrafts(next);
+      setMessage("Mapping file loaded. Review it, then press Save mapping.");
+      setError(null);
+    } catch {
+      setError("That file is not a valid LifeTagger mapping JSON.");
+    }
+  }
+
+  useEffect(() => {
+    if (!migration.data?.rows) return;
+    setDrafts((current) => {
+      const next: Record<string, Draft> = { ...current };
+      for (const row of migration.data.rows) {
+        if (next[row.legacyValue]) continue;
+        const mapped = row.mapped[0];
+        next[row.legacyValue] = mapped
+          ? { key: mapped.key, value: mapped.value, action: mapped.action }
+          : { key: "", value: row.legacyValue, action: "map" };
+      }
+      return next;
+    });
+  }, [migration.data?.rows]);
+
+  const scan = useMutation({
+    mutationFn: api.scanMigration,
+    onSuccess: () => {
+      setDrafts({});
+      setMessage(null);
+      client.invalidateQueries({ queryKey: ["migration"] });
+    },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error ? mutationError.message : "Scan failed",
+      ),
+  });
+
+  useEffect(() => {
+    if (
+      !autoScanStarted.current &&
+      migration.data &&
+      !migration.data.state.scanned &&
+      !scan.isPending
+    ) {
+      autoScanStarted.current = true;
+      scan.mutate();
+    }
+  }, [migration.data, scan.isPending]);
+
+  function mappingsFromDrafts() {
+    return Object.entries(drafts)
+      .map(([legacyValue, draft]) => ({ legacyValue, ...draft }))
+      .filter((mapping) => mapping.action === "skip" || mapping.key.trim());
+  }
+
+  const save = useMutation({
+    mutationFn: () => api.mapMigration(mappingsFromDrafts()),
+    onSuccess: () => {
+      setMessage("Mapping saved.");
+      setError(null);
+      client.invalidateQueries({ queryKey: ["migration"] });
+    },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not save mapping",
+      ),
+  });
+
+  const apply = useMutation({
+    mutationFn: async () => {
+      const currentRows = migration.data?.rows ?? [];
+      const missing = currentRows.filter((row) => {
+        const draft = drafts[row.legacyValue];
+        return !draft || (draft.action === "map" && !draft.key.trim());
+      });
+      if (missing.length > 0) {
+        throw new Error(
+          `${missing.length} legacy ${missing.length === 1 ? "string still needs" : "strings still need"} a key (or mark it Skip).`,
+        );
+      }
+      // Apply works on the server-side mapping, so persist the table as it is
+      // right now instead of relying on the user pressing Save first.
+      await api.mapMigration(mappingsFromDrafts());
+      return api.applyMigration(strip);
+    },
+    onSuccess: () => {
+      setMessage(
+        "Migration started. This can take a while for a large library.",
+      );
+      client.invalidateQueries({ queryKey: ["migration"] });
+      client.invalidateQueries({ queryKey: ["status"] });
+      client.invalidateQueries({ queryKey: ["files"] });
+      client.invalidateQueries({ queryKey: ["batch"] });
+    },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not start migration",
+      ),
+  });
+
+  const state = migration.data?.state;
+  const rows = migration.data?.rows ?? [];
+  const mappedCount = rows.filter(
+    (row) =>
+      drafts[row.legacyValue]?.action === "skip" ||
+      Boolean(drafts[row.legacyValue]?.key.trim()),
+  ).length;
+  const missingCount = rows.filter((row) => {
+    const draft = drafts[row.legacyValue];
+    return !draft || (draft.action === "map" && !draft.key.trim());
+  }).length;
+  const progress = state?.total
+    ? Math.round((state.processed / state.total) * 100)
+    : 0;
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wide text-teal-300">
+            Migration
+          </p>
+          <h1 className="text-2xl font-bold tracking-tight">
+            Old tags, mapped properly
+          </h1>
+          <p className="mt-1 max-w-2xl text-sm text-slate-400">
+            Legacy tags are plain strings. Decide what each one becomes — you
+            can change the key and the value. Nothing is applied until you press
+            the button.
+          </p>
+        </div>
+        <Link to="/settings" className="btn">
+          Settings
+        </Link>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Metric label="Legacy files" value={state?.legacyFiles ?? "—"} />
+        <Metric label="Unique strings" value={state?.legacyTags ?? "—"} />
+        <Metric label="Mapped" value={mappedCount} />
+        <Metric label="Pending" value={state?.pendingFiles ?? "—"} />
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          className="btn"
+          onClick={() => scan.mutate()}
+          disabled={scan.isPending || state?.running}
+        >
+          {scan.isPending ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <RefreshCw size={15} />
+          )}
+          {state?.scanned ? "Scan again" : "Scan for legacy tags"}
+        </button>
+        <button
+          className="btn"
+          onClick={() => save.mutate()}
+          disabled={save.isPending || rows.length === 0 || state?.running}
+        >
+          {save.isPending ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <Save size={15} />
+          )}
+          Save mapping
+        </button>
+        <span className="self-center text-[11px] text-slate-500">
+          Apply saves the table automatically.
+        </span>
+        <button
+          className="btn btn-primary"
+          onClick={() => {
+            if (
+              confirm(
+                `Apply the current mapping to ${state?.pendingFiles ?? 0} files${strip ? " and strip old filename suffixes" : ""}?`,
+              )
+            )
+              apply.mutate();
+          }}
+          disabled={
+            apply.isPending ||
+            !state?.scanned ||
+            state?.pendingFiles === 0 ||
+            state?.running
+          }
+        >
+          {apply.isPending || state?.running ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <Play size={15} />
+          )}
+          Apply migration
+        </button>
+        <label className="flex items-center gap-2 rounded-xl border border-slate-800 px-3 text-sm text-slate-400">
+          <input
+            type="checkbox"
+            checked={strip}
+            onChange={(event) => setStrip(event.target.checked)}
+          />
+          Strip old filename suffixes
+        </label>
+        {missingCount > 0 && (
+          <span className="self-center text-xs text-amber-300">
+            {missingCount}{" "}
+            {missingCount === 1 ? "row still needs" : "rows still need"} a key
+            (or Skip)
+          </span>
+        )}
+        <button
+          className="btn"
+          onClick={exportMapping}
+          disabled={rows.length === 0}
+          title="Download the mapping as JSON"
+        >
+          <Download size={15} /> Export
+        </button>
+        <button
+          className="btn"
+          onClick={() => fileInput.current?.click()}
+          title="Load a mapping JSON file"
+        >
+          <Upload size={15} /> Import
+        </button>
+        <input
+          ref={fileInput}
+          type="file"
+          accept="application/json"
+          className="hidden"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) void importMapping(file);
+            event.target.value = "";
+          }}
+        />
+      </div>
+
+      {state?.running && (
+        <div className="card p-4">
+          <div className="mb-2 flex justify-between text-xs text-slate-400">
+            <span>Applying metadata…</span>
+            <span>
+              {state.processed}/{state.total} · {state.errors} errors
+            </span>
+          </div>
+          <div className="progress-track">
+            <div className="progress-fill" style={{ width: `${progress}%` }} />
+          </div>
+        </div>
+      )}
+
+      {message && (
+        <div className="rounded-xl border border-teal-300/25 bg-teal-300/10 p-3 text-sm text-teal-100">
+          {message}
+        </div>
+      )}
+      {error && (
+        <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">
+          {error}
+        </div>
+      )}
+      {state && state.errors > 0 && !state.running && (
+        <div className="flex items-start gap-2 rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">
+          <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+          {state.errors} files could not be applied. Check that every legacy
+          string above has a key (or is explicitly skipped), and that filenames
+          do not collide.
+        </div>
+      )}
+
+      {rows.length === 0 && state?.scanned ? (
+        <div className="card p-8 text-center">
+          <Check className="mx-auto text-teal-300" size={28} />
+          <p className="mt-2 font-semibold">Nothing to migrate.</p>
+          <p className="text-sm text-slate-500">
+            No legacy filename or description tags were found.
+          </p>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="card p-8 text-center text-sm text-slate-400">
+          Run the scan to find legacy tags from the old filename and description
+          convention.
+        </div>
+      ) : (
+        <>
+          <div className="card flex flex-col gap-2 p-4 sm:flex-row sm:items-end">
+            <label className="flex-1">
+              <span className="label">Assign a key to every row</span>
+              <input
+                className="input"
+                value={bulkKey}
+                onChange={(event) => setBulkKey(event.target.value)}
+                placeholder="e.g. place, event, people, keyword"
+              />
+            </label>
+            <button
+              className="btn"
+              disabled={!bulkKey.trim()}
+              onClick={() => {
+                const key = bulkKey.trim();
+                setDrafts((current) => {
+                  const next = { ...current };
+                  for (const row of rows) {
+                    if (next[row.legacyValue]?.action === "skip") continue;
+                    next[row.legacyValue] = {
+                      ...(next[row.legacyValue] ?? { value: row.legacyValue }),
+                      key,
+                      action: "map",
+                    };
+                  }
+                  return next;
+                });
+              }}
+            >
+              Apply key to all
+            </button>
+          </div>
+
+          <div className="table-wrap">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Legacy string</th>
+                  <th>Uses</th>
+                  <th>Key</th>
+                  <th>Value</th>
+                  <th>Skip</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <MappingRow
+                    key={row.legacyValue}
+                    row={row}
+                    draft={
+                      drafts[row.legacyValue] ?? {
+                        key: "",
+                        value: row.legacyValue,
+                        action: "map",
+                      }
+                    }
+                    onChange={(draft) =>
+                      setDrafts((current) => ({
+                        ...current,
+                        [row.legacyValue]: draft,
+                      }))
+                    }
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MappingRow({
+  row,
+  draft,
+  onChange,
+}: {
+  row: MigrationTagRow;
+  draft: Draft;
+  onChange: (draft: Draft) => void;
+}) {
+  const skipped = draft.action === "skip";
+  return (
+    <tr className={skipped ? "opacity-50" : ""}>
+      <td>
+        <div className="font-mono text-xs">{row.legacyValue}</div>
+        <div className="mt-0.5 text-[10px] text-slate-500">
+          {row.sources.join(" + ")}
+        </div>
+      </td>
+      <td className="text-xs text-slate-400">{row.count}</td>
+      <td>
+        <input
+          className="input min-h-8 min-w-28 py-1 text-xs"
+          value={draft.key}
+          disabled={skipped}
+          onChange={(event) =>
+            onChange({ ...draft, key: event.target.value, action: "map" })
+          }
+          placeholder="key"
+        />
+      </td>
+      <td>
+        <input
+          className="input min-h-8 min-w-36 py-1 text-xs"
+          value={draft.value}
+          disabled={skipped}
+          onChange={(event) =>
+            onChange({ ...draft, value: event.target.value, action: "map" })
+          }
+        />
+      </td>
+      <td>
+        <input
+          type="checkbox"
+          checked={skipped}
+          onChange={(event) =>
+            onChange({
+              ...draft,
+              action: event.target.checked ? "skip" : "map",
+            })
+          }
+        />
+      </td>
+    </tr>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="card p-3">
+      <div className="text-xl font-bold">{value}</div>
+      <div className="text-[11px] text-slate-500">{label}</div>
+    </div>
+  );
+}

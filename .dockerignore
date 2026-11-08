@@ -1,0 +1,13 @@
+.git
+.gitignore
+node_modules
+web/node_modules
+dist
+web/dist
+.lifetagger
+app.env
+.env
+*.log
+test
+deploy
+README.md
