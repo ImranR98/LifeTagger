@@ -17,7 +17,11 @@ import {
 } from "./db";
 import { readMetadata } from "./metadata";
 import { cleanAssetCaches } from "./media";
-import { facesAvailable, queueFaceProcessing } from "./faces";
+import {
+  facesAvailable,
+  labelUnambiguousPeopleFaces,
+  queueFaceProcessing,
+} from "./faces";
 import { isTaskRunning } from "./tasks";
 
 export type IndexState = {
@@ -248,6 +252,9 @@ async function doScan(): Promise<void> {
         for (const row of pendingFaces) queueFaceProcessing(row);
       }
     }
+    const labeled = labelUnambiguousPeopleFaces();
+    if (labeled > 0)
+      serverLog.info(`auto-labeled ${labeled} unambiguous face(s)`);
     serverLog.info(
       `index complete: ${indexState.indexed} indexed, ${indexState.errors} errors`,
     );

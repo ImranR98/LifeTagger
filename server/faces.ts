@@ -10,6 +10,7 @@ import {
   type FaceRow,
   type FileRow,
   addTagToFile,
+  db,
   faceForId,
   facesForFile,
   fileRowById,
@@ -299,6 +300,45 @@ export function faceSuggestionsForFile(
       person,
       confidence: Math.min(0.98, confidence),
     }));
+}
+
+/**
+ * If a file has exactly one detected face and exactly one people tag, the
+ * mapping is unambiguous. Label the face so it becomes a known face for
+ * future suggestions. This also covers tags added after face detection.
+ */
+export function syncFaceLabelForFile(fileId: number): boolean {
+  const faces = facesForFile(fileId);
+  if (faces.length !== 1) return false;
+  const face = faces[0]!;
+  if (face.person_tag_id !== null) return false;
+  const people = tagsForFile(fileId).filter((tag) => tag.key === "people");
+  if (people.length !== 1) return false;
+  setFaceLabel(face.id, people[0]!.value);
+  invalidateKnownFaces();
+  return true;
+}
+
+/** Backfill unambiguous face labels from people tags after indexing. */
+export function labelUnambiguousPeopleFaces(limit = 1000): number {
+  if (!facesAvailable()) return 0;
+  const rows = db
+    .prepare(
+      `SELECT f.id AS face_id, t.value AS person
+       FROM faces f
+       JOIN file_tags ft ON ft.file_id = f.file_id
+       JOIN tags t ON t.id = ft.tag_id AND t.key = 'people'
+       WHERE f.person_tag_id IS NULL
+         AND (SELECT COUNT(*) FROM faces f2 WHERE f2.file_id = f.file_id) = 1
+         AND (SELECT COUNT(*) FROM file_tags ft2
+              JOIN tags t2 ON t2.id = ft2.tag_id
+              WHERE ft2.file_id = f.file_id AND t2.key = 'people') = 1
+       LIMIT ?`,
+    )
+    .all(limit) as { face_id: number; person: string }[];
+  for (const row of rows) setFaceLabel(row.face_id, row.person);
+  if (rows.length > 0) invalidateKnownFaces();
+  return rows.length;
 }
 
 export function faceListForFile(fileId: number): Face[] {

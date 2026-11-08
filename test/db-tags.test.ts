@@ -13,7 +13,7 @@ process.env.ALLOWED_MEDIA_ROOTS = "";
 const { db, facesForFile, replaceFacesForFile, tagsForFile, upsertFile } =
   await import("../server/db");
 const { renameTagValue } = await import("../server/tags");
-const { labelFace } = await import("../server/faces");
+const { labelFace, syncFaceLabelForFile } = await import("../server/faces");
 
 test("a case-only tag rename preserves every file association", async () => {
   const fileId = upsertFile({
@@ -81,6 +81,9 @@ test("a case-only tag rename preserves every file association", async () => {
     tagsForFile(fileId).map((tag) => ({ ...tag })),
     [{ key: "people", value: "john r" }],
   );
+
+  assert.equal(syncFaceLabelForFile(fileId), true);
+  assert.notEqual(facesForFile(fileId)[0]!.person_tag_id, null);
 });
 
 after(() => {

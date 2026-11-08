@@ -27,7 +27,11 @@ import {
 import { serverLog } from "./config";
 import { absolutePathFor } from "./media";
 import { writeMetadata } from "./metadata";
-import { faceListForFile, queueFaceProcessing } from "./faces";
+import {
+  faceListForFile,
+  queueFaceProcessing,
+  syncFaceLabelForFile,
+} from "./faces";
 import { indexState } from "./indexer";
 import { beginTask, finishTask, isTaskRunning, updateTask } from "./tasks";
 
@@ -95,6 +99,7 @@ export async function saveFileTags(
     nextTags,
     description,
   );
+  syncFaceLabelForFile(fileId);
   queueFaceProcessing(fileRowById(fileId) ?? row);
   return {
     detail: detailForFile(fileId)!,
@@ -131,6 +136,7 @@ export async function undoChange(undoId: number): Promise<FileDetail | null> {
     localDate: written.localDate ?? row.local_date,
     legacyPending: hasLegacyTags(row.name, description),
   });
+  syncFaceLabelForFile(entry.file_id);
   markUndone(undoId);
   return detailForFile(entry.file_id);
 }

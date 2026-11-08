@@ -313,7 +313,7 @@ export default function SettingsPage() {
         </label>
         <p className="text-xs text-slate-500">
           {form.faceScanMode === "on-demand"
-            ? "Faces are checked when a photo or video enters your daily batch or you open it. This keeps a 100k-file library from turning into a multi-day CPU job."
+            ? "Faces are checked when a photo or video enters your daily batch, or when you press Detect faces on its detail page. This keeps a 100k-file library from turning into a multi-day CPU job."
             : "Every indexed photo and video is queued for face detection. Videos use their poster frame. This can take a long time on a large library."}
         </p>
       </div>
