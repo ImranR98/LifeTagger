@@ -21,8 +21,12 @@ export default function MigrationPage() {
   const migration = useQuery({
     queryKey: ["migration"],
     queryFn: api.migration,
-    refetchInterval: (query) =>
-      query.state.data?.state.running ? 1200 : false,
+    refetchInterval: (query) => {
+      const state = query.state.data?.state;
+      if (state?.running) return 1200;
+      if (state?.needsScan) return 5000;
+      return false;
+    },
   });
   const status = useQuery({
     queryKey: ["status"],
