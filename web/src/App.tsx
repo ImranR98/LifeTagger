@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, LogIn } from "lucide-react";
-import { api, SessionExpiredError } from "./api";
+import { api, AuthRequiredError } from "./api";
 import { Layout } from "./components/Layout";
 import TodayPage from "./pages/Today";
 import LibraryPage from "./pages/Library";
@@ -25,7 +25,7 @@ export default function App() {
   }
 
   if (status.isError) {
-    const expired = status.error instanceof SessionExpiredError;
+    const authRequired = status.error instanceof AuthRequiredError;
     return (
       <div className="flex min-h-screen items-center justify-center p-5">
         <div className="card max-w-md p-6 text-center">
@@ -33,11 +33,11 @@ export default function App() {
             <LogIn size={22} />
           </div>
           <h1 className="mt-4 text-xl font-bold">
-            {expired ? "Sign in to continue" : "LifeTagger is unavailable"}
+            {authRequired ? "Sign in to continue" : "LifeTagger is unavailable"}
           </h1>
           <p className="mt-2 text-sm text-slate-400">
-            {expired
-              ? "Your Authelia session expired. Sign in again, then return to the app."
+            {authRequired
+              ? "Your session has expired. Reload the page after signing in."
               : status.error instanceof Error
                 ? status.error.message
                 : "The server did not respond."}

@@ -11,9 +11,15 @@ import type {
   TagSuggestion,
 } from "@shared/types";
 
-export class SessionExpiredError extends Error {
+export class AuthRequiredError extends Error {
   constructor() {
-    super("Your session expired. Sign in again to continue.");
+    super("Your session has expired. Reload the page to sign in again.");
+  }
+}
+
+export class NetworkError extends Error {
+  constructor() {
+    super("Could not reach LifeTagger. Check your connection and try again.");
   }
 }
 
@@ -22,6 +28,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     response = await fetch(path, {
       credentials: "same-origin",
+      // Do not follow a reverse-proxy login redirect from an API request.
+      // A manual redirect is detectable, while a followed one would return the
+      // login page or fail CORS and look like a generic network error.
+      redirect: "manual",
       ...init,
       headers: {
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
@@ -29,11 +39,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       },
     });
   } catch {
-    throw new SessionExpiredError();
+    throw new NetworkError();
   }
   const contentType = response.headers.get("content-type") ?? "";
-  if (response.redirected || !contentType.includes("application/json")) {
-    throw new SessionExpiredError();
+  if (
+    response.type === "opaqueredirect" ||
+    response.status === 401 ||
+    response.status === 403 ||
+    response.redirected ||
+    !contentType.includes("application/json")
+  ) {
+    throw new AuthRequiredError();
   }
   const data = (await response.json()) as T & { error?: string };
   if (!response.ok)

@@ -1,14 +1,16 @@
 /// <reference lib="webworker" />
 
-import { precacheAndRoute, createHandlerBoundToURL } from "workbox-precaching";
-import { NavigationRoute, registerRoute } from "workbox-routing";
+import { precacheAndRoute } from "workbox-precaching";
 
 declare const self: ServiceWorkerGlobalScope & {
   __WB_MANIFEST: Array<{ url: string; revision?: string | null }>;
 };
 
+// Do not add a NavigationRoute here. Top-level navigations must reach the
+// reverse proxy so forward-auth can redirect to the login page. Serving a
+// cached app shell for navigations bypasses that flow and leaves the user
+// stuck with API requests that redirect to a login page.
 precacheAndRoute(self.__WB_MANIFEST);
-registerRoute(new NavigationRoute(createHandlerBoundToURL("/index.html")));
 
 type PushPayload = {
   title?: string;
