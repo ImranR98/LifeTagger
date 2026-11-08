@@ -243,6 +243,7 @@ async function runFaceQueue(): Promise<void> {
       const fresh = fileRowById(file.id);
       if (!fresh) continue;
       await processFacesForFile(fresh);
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
   } finally {
     faceQueueRunning = false;

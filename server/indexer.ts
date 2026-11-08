@@ -112,6 +112,10 @@ async function mapLimit<T, R>(
       const item = items[index];
       if (item === undefined) return;
       results[index] = await fn(item, index);
+      // Let HTTP probes and other I/O run between files. Indexing a large
+      // library otherwise keeps a near-continuous stream of synchronous
+      // SQLite work on the event loop.
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
   await Promise.all(
