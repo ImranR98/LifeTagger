@@ -16,6 +16,7 @@ type Props = {
   onChange: (tags: Tag[]) => void;
   onSuggested?: (suggestion: TagSuggestion) => void;
   onRejectSuggestion?: (suggestion: TagSuggestion) => void;
+  onConfirmTag?: (tag: Tag) => void;
   disabled?: boolean;
 };
 
@@ -27,11 +28,22 @@ export function TagEditor({
   onChange,
   onSuggested,
   onRejectSuggestion,
+  onConfirmTag,
   disabled,
 }: Props) {
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const groups = useMemo(() => groupTags(tags), [tags]);
+  const sourceByTag = useMemo(
+    () =>
+      new Map(
+        tags.map((tag) => [
+          `${tag.key}\u0000${valueNorm(tag.value)}`,
+          tag.source ?? "user",
+        ]),
+      ),
+    [tags],
+  );
   const keyOptions = useMemo(
     () =>
       Array.from(
@@ -165,6 +177,27 @@ export function TagEditor({
                 <span key={`${group.key}:${value}`} className="chip">
                   <span className="chip-key">{group.key}</span>
                   <span>{value}</span>
+                  {(() => {
+                    const source =
+                      sourceByTag.get(
+                        `${group.key}\u0000${valueNorm(value)}`,
+                      ) ?? "user";
+                    if (source !== "face-auto" && source !== "place-auto")
+                      return null;
+                    return (
+                      <button
+                        type="button"
+                        className="chip-auto"
+                        disabled={disabled || !onConfirmTag}
+                        title="Auto-generated. Click to confirm."
+                        onClick={() =>
+                          onConfirmTag?.({ key: group.key, value })
+                        }
+                      >
+                        AUTO
+                      </button>
+                    );
+                  })()}
                   <button
                     type="button"
                     className="chip-remove"

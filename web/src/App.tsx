@@ -11,6 +11,7 @@ import TagsPage from "./pages/Tags";
 import StatsPage from "./pages/Stats";
 import SettingsPage from "./pages/Settings";
 import MigrationPage from "./pages/Migration";
+import ReviewPage from "./pages/Review";
 import SetupPage from "./pages/Setup";
 
 export default function App() {
@@ -61,6 +62,7 @@ export default function App() {
         <Route path="/" element={<Navigate to="/today" replace />} />
         <Route path="/today" element={<TodayPage />} />
         <Route path="/library" element={<LibraryPage />} />
+        <Route path="/review" element={<ReviewPage />} />
         <Route path="/file/:id" element={<FileDetailPage />} />
         <Route path="/people" element={<PeoplePage />} />
         <Route path="/tags" element={<TagsPage />} />

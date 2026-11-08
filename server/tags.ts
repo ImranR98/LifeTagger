@@ -33,7 +33,13 @@ import {
   syncFaceLabelForFile,
 } from "./faces";
 import { indexState } from "./indexer";
-import { beginTask, finishTask, isTaskRunning, updateTask } from "./tasks";
+import {
+  beginTask,
+  finishTask,
+  isTaskRunning,
+  isWriteTaskRunning,
+  updateTask,
+} from "./tasks";
 
 export function detailForFile(fileId: number): FileDetail | null {
   const row = fileRowById(fileId);
@@ -62,7 +68,7 @@ export async function saveFileTags(
   tags: Tag[],
   description: string,
 ): Promise<SaveResult> {
-  if (isTaskRunning())
+  if (isWriteTaskRunning())
     throw new Error("Wait for the current task to finish before saving");
   const row = fileRowById(fileId);
   if (!row) throw new Error("file not found");
@@ -109,7 +115,7 @@ export async function saveFileTags(
 }
 
 export async function undoChange(undoId: number): Promise<FileDetail | null> {
-  if (isTaskRunning())
+  if (isWriteTaskRunning())
     throw new Error("Wait for the current task to finish before undoing");
   const entry = undoEntry(undoId);
   if (!entry || entry.undone === 1) return null;

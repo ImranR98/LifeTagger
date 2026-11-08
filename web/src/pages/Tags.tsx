@@ -52,10 +52,17 @@ export default function TagsPage() {
       ),
   });
 
-  const valuesByKey = new Map<string, { value: string; count: number }[]>();
+  const valuesByKey = new Map<
+    string,
+    { value: string; count: number; autoCount: number }[]
+  >();
   for (const entry of tags.data?.values ?? []) {
     const list = valuesByKey.get(entry.key) ?? [];
-    list.push({ value: entry.value, count: entry.count });
+    list.push({
+      value: entry.value,
+      count: entry.count,
+      autoCount: entry.autoCount,
+    });
     valuesByKey.set(entry.key, list);
   }
 
@@ -149,6 +156,7 @@ export default function TagsPage() {
                   tagKey={key.key}
                   value={entry.value}
                   count={entry.count}
+                  autoCount={entry.autoCount}
                   disabled={busy}
                   onError={setError}
                 />
@@ -179,12 +187,14 @@ function ValueRow({
   tagKey,
   value,
   count,
+  autoCount,
   disabled,
   onError,
 }: {
   tagKey: string;
   value: string;
   count: number;
+  autoCount: number;
   disabled?: boolean;
   onError: (message: string) => void;
 }) {
@@ -227,6 +237,9 @@ function ValueRow({
       <div className="flex min-w-0 flex-1 items-center gap-2">
         <span className="truncate text-sm font-medium">{value}</span>
         <span className="pill shrink-0">{count}</span>
+        {autoCount > 0 && (
+          <span className="pill shrink-0 text-amber-300">{autoCount} auto</span>
+        )}
       </div>
       <input
         className="input min-h-9 flex-1 py-1.5"

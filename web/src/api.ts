@@ -4,6 +4,8 @@ import type {
   FileSummary,
   MigrationState,
   MigrationTagRow,
+  ReviewCounts,
+  ReviewSuggestion,
   SettingsResponse,
   StatsResponse,
   StatusResponse,
@@ -171,7 +173,12 @@ export const api = {
   tags: () =>
     request<{
       keys: { key: string; multiValue: boolean; count: number }[];
-      values: { key: string; value: string; count: number }[];
+      values: {
+        key: string;
+        value: string;
+        count: number;
+        autoCount: number;
+      }[];
     }>("/api/tags"),
 
   renameTag: (key: string, from: string, to: string) =>
@@ -194,6 +201,59 @@ export const api = {
     request<{ ok: boolean }>("/api/tags/keys", {
       method: "POST",
       body: JSON.stringify({ key, multiValue }),
+    }),
+
+  confirmTag: (fileId: number, key: string, value: string) =>
+    request<{ ok: boolean }>(`/api/files/${fileId}/tags/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ key, value }),
+    }),
+
+  runPlaceAutomation: () =>
+    request<{ started: boolean; reason?: string }>(
+      "/api/automation/places/run",
+      { method: "POST" },
+    ),
+  runFaceAutomation: () =>
+    request<{ started: boolean; reason?: string }>(
+      "/api/automation/faces/run",
+      { method: "POST" },
+    ),
+  scanAllFaces: (autoMatch = true) =>
+    request<{ started: boolean; reason?: string }>(
+      "/api/automation/faces/scan",
+      {
+        method: "POST",
+        body: JSON.stringify({ autoMatch }),
+      },
+    ),
+  cancelTask: () =>
+    request<{ ok: boolean }>("/api/automation/cancel", { method: "POST" }),
+
+  reviewCounts: () => request<ReviewCounts>("/api/review/counts"),
+  reviewSuggestions: (params: {
+    kind?: "face" | "place";
+    cursor?: number;
+    limit?: number;
+  }) =>
+    request<{
+      suggestions: ReviewSuggestion[];
+      cursor: number | null;
+      hasMore: boolean;
+    }>(`/api/review/suggestions${query(params)}`),
+  approveReview: (ids: number[]) =>
+    request<{ started: boolean; reason?: string }>("/api/review/approve", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
+  rejectReview: (ids: number[]) =>
+    request<{ updated: number }>("/api/review/reject", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
+  resetRejectedSuggestions: () =>
+    request<{ deleted: number }>("/api/review/reset-rejected", {
+      method: "POST",
     }),
 
   stats: () => request<StatsResponse>("/api/stats"),
@@ -292,6 +352,8 @@ export type {
   BatchResponse,
   FileDetail,
   FileSummary,
+  ReviewCounts,
+  ReviewSuggestion,
   SettingsResponse,
   StatsResponse,
   StatusResponse,

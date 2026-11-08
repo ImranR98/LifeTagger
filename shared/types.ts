@@ -1,4 +1,4 @@
-export type Tag = { key: string; value: string };
+export type Tag = { key: string; value: string; source?: string };
 
 export type TagSuggestion = {
   key: string;
@@ -15,6 +15,8 @@ export type Face = {
   fileId: number;
   bbox: { x: number; y: number; w: number; h: number };
   label: string | null;
+  labelSource?: string | null;
+  labelConfidence?: number | null;
   confidence: number;
 };
 
@@ -106,14 +108,20 @@ export type TaskKind =
   | "migration-apply"
   | "tag-rename"
   | "tag-remove"
-  | "cluster-label";
+  | "cluster-label"
+  | "face-scan"
+  | "face-auto"
+  | "place-auto"
+  | "review-apply";
 
 export type TaskState = {
   kind: TaskKind;
   running: boolean;
+  phase: string | null;
   processed: number;
   total: number;
   errors: number;
+  cancelRequested: boolean;
   startedAt: string | null;
   finishedAt: string | null;
   message: string | null;
@@ -150,6 +158,29 @@ export type SettingsResponse = {
   suggestionRadiusM: number;
   facesEnabled: boolean;
   faceScanMode: "on-demand" | "background";
+  faceAutoThreshold: number;
+  faceAutoMargin: number;
+  faceMinQuality: number;
+  placeAutoRadiusM: number;
+  placeReviewRadiusM: number;
   pushConfigured: boolean;
   publicUrl: string;
+};
+
+export type ReviewSuggestion = {
+  id: number;
+  kind: "face" | "place";
+  fileId: number;
+  faceId: number | null;
+  key: string;
+  value: string;
+  confidence: number;
+  distanceM: number | null;
+  thumbUrl: string;
+};
+
+export type ReviewCounts = {
+  face: number;
+  place: number;
+  total: number;
 };

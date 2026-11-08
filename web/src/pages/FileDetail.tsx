@@ -30,7 +30,10 @@ export default function FileDetailPage() {
     refetchInterval: (query) =>
       query.state.data?.task?.running ? 1500 : false,
   });
-  const taskBusy = Boolean(status.data?.task?.running);
+  const anyTaskBusy = Boolean(status.data?.task?.running);
+  const writeTaskBusy = Boolean(
+    status.data?.task?.running && status.data.task.kind !== "face-scan",
+  );
   const [tags, setTags] = useState<Tag[]>([]);
   const [description, setDescription] = useState("");
   const [undoId, setUndoId] = useState<number | null>(null);
@@ -83,6 +86,14 @@ export default function FileDetailPage() {
       setError(null);
       client.invalidateQueries({ queryKey: ["file", fileId] });
       client.invalidateQueries({ queryKey: ["people"] });
+    },
+  });
+
+  const confirmTag = useMutation({
+    mutationFn: (tag: Tag) => api.confirmTag(fileId, tag.key, tag.value),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["file", fileId] });
+      client.invalidateQueries({ queryKey: ["tags"] });
     },
   });
 
@@ -155,7 +166,7 @@ export default function FileDetailPage() {
               <button
                 className="btn px-3 py-1.5 text-xs"
                 onClick={() => detect.mutate()}
-                disabled={detect.isPending || taskBusy}
+                disabled={detect.isPending || anyTaskBusy}
               >
                 {detect.isPending ? (
                   <Loader2 size={14} className="animate-spin" />
@@ -173,7 +184,14 @@ export default function FileDetailPage() {
                     face={face}
                     index={index}
                     fileId={fileId}
-                    disabled={taskBusy}
+                    disabled={anyTaskBusy}
+                    onConfirmAuto={() => {
+                      if (face.label)
+                        confirmTag.mutate({
+                          key: "people",
+                          value: face.label,
+                        });
+                    }}
                   />
                 ))}
               </div>
@@ -194,7 +212,8 @@ export default function FileDetailPage() {
               keys={availableKeys}
               values={tagsQuery.data?.values}
               onChange={setTags}
-              disabled={save.isPending || taskBusy}
+              onConfirmTag={(tag) => confirmTag.mutate(tag)}
+              disabled={save.isPending || writeTaskBusy}
             />
           </div>
           <div className="card p-4">
@@ -222,7 +241,7 @@ export default function FileDetailPage() {
                 <button
                   className="btn btn-ghost px-2 py-1 text-xs text-teal-300"
                   onClick={() => undo.mutate()}
-                  disabled={taskBusy}
+                  disabled={writeTaskBusy}
                 >
                   <Undo2 size={13} /> Undo
                 </button>
@@ -233,7 +252,7 @@ export default function FileDetailPage() {
           <button
             className="btn btn-primary btn-lg w-full"
             onClick={() => save.mutate()}
-            disabled={save.isPending || taskBusy}
+            disabled={save.isPending || writeTaskBusy}
           >
             {save.isPending ? (
               <Loader2 className="animate-spin" size={18} />
@@ -253,11 +272,13 @@ function FaceLabel({
   index,
   fileId,
   disabled,
+  onConfirmAuto,
 }: {
   face: Face;
   index: number;
   fileId: number;
   disabled?: boolean;
+  onConfirmAuto?: () => void;
 }) {
   const client = useQueryClient();
   const [name, setName] = useState(face.label ?? "");
@@ -280,8 +301,19 @@ function FaceLabel({
       <span className="grid h-9 w-9 place-items-center rounded-full bg-slate-800 text-slate-400">
         <UserRound size={17} />
       </span>
-      <span className="w-16 shrink-0 text-[11px] text-slate-500">
+      <span className="flex w-24 shrink-0 items-center gap-1 text-[11px] text-slate-500">
         Face {index + 1}
+        {face.labelSource === "face-auto" && (
+          <button
+            type="button"
+            className="chip-auto"
+            disabled={disabled}
+            title="Auto-generated. Click to confirm."
+            onClick={onConfirmAuto}
+          >
+            AUTO
+          </button>
+        )}
       </span>
       <input
         className="input min-h-9 py-1.5"

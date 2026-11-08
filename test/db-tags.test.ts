@@ -40,7 +40,7 @@ test("a case-only tag rename preserves every file association", async () => {
 
   assert.deepEqual(
     tagsForFile(fileId).map((tag) => ({ ...tag })),
-    [{ key: "people", value: "John R" }],
+    [{ key: "people", value: "John R", source: "import" }],
   );
 
   const result = await renameTagValue("people", "John R", "john r");
@@ -49,7 +49,7 @@ test("a case-only tag rename preserves every file association", async () => {
   assert.equal(result.updated, 1);
   assert.deepEqual(
     tagsForFile(fileId).map((tag) => ({ ...tag })),
-    [{ key: "people", value: "john r" }],
+    [{ key: "people", value: "john r", source: "import" }],
   );
 
   replaceFacesForFile(fileId, [
@@ -64,22 +64,22 @@ test("a case-only tag rename preserves every file association", async () => {
   assert.deepEqual(
     tagsForFile(fileId).map((tag) => ({ ...tag })),
     [
-      { key: "people", value: "Alice" },
-      { key: "people", value: "john r" },
+      { key: "people", value: "Alice", source: "face" },
+      { key: "people", value: "john r", source: "import" },
     ],
   );
   await labelFace(faceId, "alice");
   assert.deepEqual(
     tagsForFile(fileId).map((tag) => ({ ...tag })),
     [
-      { key: "people", value: "Alice" },
-      { key: "people", value: "john r" },
+      { key: "people", value: "Alice", source: "face" },
+      { key: "people", value: "john r", source: "import" },
     ],
   );
   await labelFace(faceId, null);
   assert.deepEqual(
     tagsForFile(fileId).map((tag) => ({ ...tag })),
-    [{ key: "people", value: "john r" }],
+    [{ key: "people", value: "john r", source: "import" }],
   );
 
   assert.equal(syncFaceLabelForFile(fileId), true);

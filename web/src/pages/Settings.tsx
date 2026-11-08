@@ -9,6 +9,7 @@ import {
   Save,
   ScanFace,
   ShieldCheck,
+  Sparkles,
   Tags,
 } from "lucide-react";
 import { api } from "../api";
@@ -35,9 +36,15 @@ export default function SettingsPage() {
     suggestionRadiusM: number;
     facesEnabled: boolean;
     faceScanMode: "on-demand" | "background";
+    faceAutoThreshold: number;
+    faceAutoMargin: number;
+    faceMinQuality: number;
+    placeAutoRadiusM: number;
+    placeReviewRadiusM: number;
   } | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [installPrompt, setInstallPrompt] = useState<InstallPromptEvent | null>(
     null,
   );
@@ -54,6 +61,11 @@ export default function SettingsPage() {
       suggestionRadiusM: settings.data.suggestionRadiusM,
       facesEnabled: settings.data.facesEnabled,
       faceScanMode: settings.data.faceScanMode,
+      faceAutoThreshold: settings.data.faceAutoThreshold,
+      faceAutoMargin: settings.data.faceAutoMargin,
+      faceMinQuality: settings.data.faceMinQuality,
+      placeAutoRadiusM: settings.data.placeAutoRadiusM,
+      placeReviewRadiusM: settings.data.placeReviewRadiusM,
     });
   }, [settings.data, form]);
 
@@ -73,6 +85,7 @@ export default function SettingsPage() {
     mutationFn: () => api.updateSettings(form!),
     onSuccess: () => {
       setError(null);
+      setNotice(null);
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
       client.invalidateQueries({ queryKey: ["settings"] });
@@ -85,6 +98,21 @@ export default function SettingsPage() {
         mutationError instanceof Error
           ? mutationError.message
           : "Could not save settings",
+      ),
+  });
+
+  const resetRejected = useMutation({
+    mutationFn: api.resetRejectedSuggestions,
+    onSuccess: (result) => {
+      setError(null);
+      setNotice(`${result.deleted} rejected suggestion(s) reset.`);
+      client.invalidateQueries({ queryKey: ["review"] });
+    },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not reset rejected suggestions",
       ),
   });
 
@@ -132,6 +160,19 @@ export default function SettingsPage() {
     !Number.isFinite(form.suggestionRadiusM) ||
     form.suggestionRadiusM < 50 ||
     form.suggestionRadiusM > 20_000 ||
+    !Number.isFinite(form.faceAutoThreshold) ||
+    form.faceAutoThreshold < 0.3 ||
+    form.faceAutoThreshold > 0.99 ||
+    !Number.isFinite(form.faceAutoMargin) ||
+    form.faceAutoMargin < 0 ||
+    form.faceAutoMargin > 0.5 ||
+    !Number.isFinite(form.faceMinQuality) ||
+    form.faceMinQuality < 0 ||
+    form.faceMinQuality > 1 ||
+    !Number.isFinite(form.placeAutoRadiusM) ||
+    form.placeAutoRadiusM < 1 ||
+    !Number.isFinite(form.placeReviewRadiusM) ||
+    form.placeReviewRadiusM < form.placeAutoRadiusM ||
     !form.reminderTime ||
     !form.timezone.trim();
   const rootChanged =
@@ -265,6 +306,11 @@ export default function SettingsPage() {
             {error}
           </div>
         )}
+        {notice && (
+          <div className="rounded-xl border border-teal-300/25 bg-teal-300/10 p-3 text-sm text-teal-100">
+            {notice}
+          </div>
+        )}
         {status.data?.indexing.running && (
           <p className="text-xs text-amber-300">
             Indexing {status.data.indexing.scanned}/{status.data.indexing.total}{" "}
@@ -316,6 +362,114 @@ export default function SettingsPage() {
             ? "Faces are checked when a photo or video enters your daily batch, or when you press Detect faces on its detail page. This keeps a 100k-file library from turning into a multi-day CPU job."
             : "Every indexed photo and video is queued for face detection. Videos use their poster frame. This can take a long time on a large library."}
         </p>
+      </div>
+
+      <div className="card space-y-4 p-5">
+        <h2 className="flex items-center gap-2 text-sm font-semibold">
+          <Sparkles size={17} className="text-teal-300" /> Automation
+        </h2>
+        <p className="text-sm text-slate-400">
+          High-confidence matches are applied automatically. Lower-confidence
+          matches wait in Review for approval.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label>
+            <span className="label">Face auto threshold</span>
+            <input
+              type="number"
+              min={0.3}
+              max={0.99}
+              step={0.01}
+              className="input"
+              value={form.faceAutoThreshold}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  faceAutoThreshold: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label>
+            <span className="label">Face auto margin</span>
+            <input
+              type="number"
+              min={0}
+              max={0.5}
+              step={0.01}
+              className="input"
+              value={form.faceAutoMargin}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  faceAutoMargin: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label>
+            <span className="label">Minimum face quality</span>
+            <input
+              type="number"
+              min={0}
+              max={1}
+              step={0.01}
+              className="input"
+              value={form.faceMinQuality}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  faceMinQuality: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <span />
+          <label>
+            <span className="label">Place auto radius (m)</span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              className="input"
+              value={form.placeAutoRadiusM}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  placeAutoRadiusM: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label>
+            <span className="label">Place review radius (m)</span>
+            <input
+              type="number"
+              min={10}
+              step={10}
+              className="input"
+              value={form.placeReviewRadiusM}
+              onChange={(event) =>
+                setForm({
+                  ...form,
+                  placeReviewRadiusM: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Link to="/review" className="btn btn-primary">
+            <Sparkles size={15} /> Open review
+          </Link>
+          <button
+            className="btn"
+            onClick={() => resetRejected.mutate()}
+            disabled={resetRejected.isPending || taskRunning}
+          >
+            Reset rejected suggestions
+          </button>
+        </div>
       </div>
 
       <PushSettings pushConfigured={settings.data?.pushConfigured ?? false} />

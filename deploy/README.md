@@ -95,9 +95,10 @@ choose the media subtree (usually `/media`), and let the background index run.
   that user must own/write the media files. Never run a recursive `chown` on
   the media tree.
 - App data: `lifetagger-data-pvc` on `nfs-apps`, 50 GiB. It holds the SQLite
-  index, thumbnails, previews, face models, metadata backups, and DB snapshots.
-  The PVC is labelled `auto-backup`; thumbnails, previews, and models are
-  excluded from backups because they are rebuildable.
+  index, thumbnails, previews, face thumbnails, face models, metadata backups,
+  and DB snapshots. The PVC is labelled `auto-backup`; thumbnails, previews,
+  face thumbnails, and models are excluded from backups because they are
+  rebuildable.
 - SQLite runs in rollback-journal mode because the database lives on NFS. Keep
   one replica and the `Recreate` strategy.
 - Add unusual formats with `LIFETAGGER_EXTRA_IMAGE_EXT` or

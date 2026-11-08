@@ -17,6 +17,7 @@ import {
   getSetting,
   labeledFaces,
   markFacesFailed,
+  referenceFaces,
   removeTagFromFileIfSource,
   replaceFacesForFile,
   setFaceLabel,
@@ -52,7 +53,7 @@ let knownFaceCache: {
 
 function knownFaces(): (FaceRow & { file_path: string })[] {
   if (!knownFaceCache || Date.now() - knownFaceCache.at > 30_000) {
-    knownFaceCache = { at: Date.now(), rows: labeledFaces() };
+    knownFaceCache = { at: Date.now(), rows: referenceFaces() };
   }
   return knownFaceCache.rows;
 }
@@ -157,7 +158,7 @@ async function getHuman(): Promise<HumanLike | null> {
   return humanPromise;
 }
 
-function embeddingToArray(buffer: Uint8Array): number[] {
+export function embeddingToArray(buffer: Uint8Array): number[] {
   const view = new Float32Array(
     buffer.buffer,
     buffer.byteOffset,
@@ -166,9 +167,12 @@ function embeddingToArray(buffer: Uint8Array): number[] {
   return Array.from(view);
 }
 
-export async function processFacesForFile(file: FileRow): Promise<void> {
+export async function processFacesForFile(
+  file: FileRow,
+  options: { force?: boolean } = {},
+): Promise<void> {
   if (!facesAvailable()) return;
-  if (isTaskRunning()) return;
+  if (!options.force && isTaskRunning()) return;
   if (file.faces_processed !== 0) return;
   const human = await getHuman();
   if (!human) {
@@ -220,7 +224,11 @@ export async function processFacesForFile(file: FileRow): Promise<void> {
     const people = tagsForFile(file.id).filter((tag) => tag.key === "people");
     if (faces.length === 1 && people.length === 1) {
       const stored = facesForFile(file.id)[0];
-      if (stored) setFaceLabel(stored.id, people[0]!.value);
+      if (stored)
+        setFaceLabel(stored.id, people[0]!.value, {
+          source: "tag-sync",
+          confidence: 1,
+        });
     }
     invalidateKnownFaces();
     serverLog.info("faces processed", file.path, faces.length);
@@ -254,7 +262,7 @@ async function runFaceQueue(): Promise<void> {
   }
 }
 
-function cosine(a: number[], b: number[]): number {
+export function cosine(a: number[], b: number[]): number {
   let dot = 0;
   let na = 0;
   let nb = 0;
@@ -308,13 +316,17 @@ export function faceSuggestionsForFile(
  * future suggestions. This also covers tags added after face detection.
  */
 export function syncFaceLabelForFile(fileId: number): boolean {
+  if (isTaskRunning()) return false;
   const faces = facesForFile(fileId);
   if (faces.length !== 1) return false;
   const face = faces[0]!;
   if (face.person_tag_id !== null) return false;
   const people = tagsForFile(fileId).filter((tag) => tag.key === "people");
   if (people.length !== 1) return false;
-  setFaceLabel(face.id, people[0]!.value);
+  setFaceLabel(face.id, people[0]!.value, {
+    source: "tag-sync",
+    confidence: 1,
+  });
   invalidateKnownFaces();
   return true;
 }
@@ -336,7 +348,11 @@ export function labelUnambiguousPeopleFaces(limit = 1000): number {
        LIMIT ?`,
     )
     .all(limit) as { face_id: number; person: string }[];
-  for (const row of rows) setFaceLabel(row.face_id, row.person);
+  for (const row of rows)
+    setFaceLabel(row.face_id, row.person, {
+      source: "tag-sync",
+      confidence: 1,
+    });
   if (rows.length > 0) invalidateKnownFaces();
   return rows.length;
 }
@@ -352,6 +368,8 @@ export function faceListForFile(fileId: number): Face[] {
       h: number;
     },
     label: face.label,
+    labelSource: face.label_source,
+    labelConfidence: face.label_confidence,
     confidence: face.quality,
   }));
 }
@@ -373,11 +391,13 @@ export async function labelFace(
       (face) => face.id !== faceId && face.label === previous,
     );
     if (!stillUsed) {
-      removeTagFromFileIfSource(
-        result.fileId,
-        { key: "people", value: previous },
-        "face",
-      );
+      for (const source of ["face", "face-auto"]) {
+        removeTagFromFileIfSource(
+          result.fileId,
+          { key: "people", value: previous },
+          source,
+        );
+      }
     }
   }
   if (person || previous) await persistFileTags(result.fileId);

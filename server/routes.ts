@@ -21,7 +21,12 @@ import {
   summaryFromRow,
 } from "./db";
 import { indexState, scanMedia } from "./indexer";
-import { absolutePathFor, getPreview, getThumbnail } from "./media";
+import {
+  absolutePathFor,
+  getFaceThumbnail,
+  getPreview,
+  getThumbnail,
+} from "./media";
 import {
   detailForFile,
   removeTagEverywhere,
@@ -47,7 +52,19 @@ import {
   startMigrationScan,
   type MappingInput,
 } from "./migration";
-import { getTask, isTaskRunning } from "./tasks";
+import { getTask, isTaskRunning, requestTaskCancel } from "./tasks";
+import {
+  automationRunCounts,
+  confirmAutoTag,
+  listReviewSuggestions,
+  rejectReviewSuggestions,
+  resetRejectedSuggestions,
+  reviewCounts,
+  startFaceAutomation,
+  startFaceScan,
+  startPlaceAutomation,
+  startReviewApproval,
+} from "./automation";
 import {
   faceListForFile,
   facesAvailable,
@@ -161,6 +178,11 @@ const settingsSchema = z.object({
   suggestionRadiusM: z.number().int().min(50).max(20_000).optional(),
   facesEnabled: z.boolean().optional(),
   faceScanMode: z.enum(["on-demand", "background"]).optional(),
+  faceAutoThreshold: z.number().min(0.3).max(0.99).optional(),
+  faceAutoMargin: z.number().min(0).max(0.5).optional(),
+  faceMinQuality: z.number().min(0).max(1).optional(),
+  placeAutoRadiusM: z.number().int().min(1).max(20_000).optional(),
+  placeReviewRadiusM: z.number().int().min(10).max(50_000).optional(),
 });
 
 router.get("/settings", (_req, res) => {
@@ -177,6 +199,17 @@ router.get("/settings", (_req, res) => {
       (settings.facesEnabled ?? String(config.facesEnabled)) === "true",
     faceScanMode:
       settings.faceScanMode === "background" ? "background" : "on-demand",
+    faceAutoThreshold: Number(
+      settings.faceAutoThreshold ?? config.faceAutoThreshold,
+    ),
+    faceAutoMargin: Number(settings.faceAutoMargin ?? config.faceAutoMargin),
+    faceMinQuality: Number(settings.faceMinQuality ?? config.faceMinQuality),
+    placeAutoRadiusM: Number(
+      settings.placeAutoRadiusM ?? config.placeAutoRadiusM,
+    ),
+    placeReviewRadiusM: Number(
+      settings.placeReviewRadiusM ?? config.placeReviewRadiusM,
+    ),
     pushConfigured: pushConfigured(),
     publicUrl: config.publicUrl,
   });
@@ -238,6 +271,16 @@ router.patch("/settings", (req, res) => {
     setSetting("facesEnabled", input.facesEnabled ? "true" : "false");
   if (input.faceScanMode !== undefined)
     setSetting("faceScanMode", input.faceScanMode);
+  if (input.faceAutoThreshold !== undefined)
+    setSetting("faceAutoThreshold", String(input.faceAutoThreshold));
+  if (input.faceAutoMargin !== undefined)
+    setSetting("faceAutoMargin", String(input.faceAutoMargin));
+  if (input.faceMinQuality !== undefined)
+    setSetting("faceMinQuality", String(input.faceMinQuality));
+  if (input.placeAutoRadiusM !== undefined)
+    setSetting("placeAutoRadiusM", String(input.placeAutoRadiusM));
+  if (input.placeReviewRadiusM !== undefined)
+    setSetting("placeReviewRadiusM", String(input.placeReviewRadiusM));
   if (rootChanged) scanMedia().catch(() => undefined);
   res.json({ ok: true });
 });
@@ -460,6 +503,84 @@ router.post("/tags/remove", async (req, res) => {
   res.status(result.started ? 200 : 409).json(result);
 });
 
+const confirmTagSchema = z.object({ key: z.string(), value: z.string() });
+router.post("/files/:id/tags/confirm", (req, res) => {
+  const id = numberParam(req.params.id);
+  if (!id) return fail(res, 400, "Invalid file id");
+  const parsed = confirmTagSchema.safeParse(req.body);
+  if (!parsed.success) return fail(res, 400, "Invalid request");
+  if (!confirmAutoTag(id, parsed.data.key, parsed.data.value))
+    return fail(res, 404, "Auto-generated tag not found");
+  res.json({ ok: true });
+});
+
+router.post("/automation/places/run", (_req, res) => {
+  const result = startPlaceAutomation();
+  res.status(result.started ? 200 : 409).json(result);
+});
+
+router.post("/automation/faces/run", (_req, res) => {
+  const result = startFaceAutomation();
+  res.status(result.started ? 200 : 409).json(result);
+});
+
+router.post("/automation/faces/scan", (req, res) => {
+  const autoMatch = req.body?.autoMatch !== false;
+  const result = startFaceScan({ autoMatch });
+  res.status(result.started ? 200 : 409).json(result);
+});
+
+router.post("/automation/cancel", (_req, res) => {
+  const task = getTask();
+  if (
+    !task ||
+    !["face-scan", "face-auto", "place-auto", "review-apply"].includes(
+      task.kind,
+    )
+  ) {
+    return fail(res, 409, "No automation task is running");
+  }
+  if (!requestTaskCancel()) return fail(res, 409, "No task is running");
+  res.json({ ok: true });
+});
+
+router.get("/automation/runs", (_req, res) => {
+  res.json({ runs: automationRunCounts() });
+});
+
+router.get("/review/counts", (_req, res) => {
+  res.json(reviewCounts());
+});
+
+router.get("/review/suggestions", (req, res) => {
+  const kind =
+    req.query.kind === "face" || req.query.kind === "place"
+      ? req.query.kind
+      : undefined;
+  const cursor =
+    Number.parseInt(String(req.query.cursor ?? ""), 10) || undefined;
+  const limit = Number.parseInt(String(req.query.limit ?? ""), 10) || 60;
+  res.json(listReviewSuggestions({ kind, cursor, limit }));
+});
+
+const reviewIdsSchema = z.object({
+  ids: z.array(z.number().int().positive()).min(1).max(500),
+});
+router.post("/review/approve", (req, res) => {
+  const parsed = reviewIdsSchema.safeParse(req.body);
+  if (!parsed.success) return fail(res, 400, "Select at least one suggestion");
+  const result = startReviewApproval(parsed.data.ids);
+  res.status(result.started ? 200 : 409).json(result);
+});
+router.post("/review/reject", (req, res) => {
+  const parsed = reviewIdsSchema.safeParse(req.body);
+  if (!parsed.success) return fail(res, 400, "Select at least one suggestion");
+  res.json({ updated: rejectReviewSuggestions(parsed.data.ids) });
+});
+router.post("/review/reset-rejected", (_req, res) => {
+  res.json({ deleted: resetRejectedSuggestions() });
+});
+
 router.get("/stats", (_req, res) => {
   res.json(stats());
 });
@@ -553,6 +674,19 @@ router.post("/push/test", async (_req, res) => {
 
 router.get("/faces/people", (_req, res) => {
   res.json({ people: peopleList() });
+});
+
+router.get("/faces/:id/thumb", async (req, res) => {
+  const id = numberParam(req.params.id);
+  if (!id) return fail(res, 400, "Invalid face id");
+  try {
+    const thumb = await getFaceThumbnail(id);
+    if (!thumb) return fail(res, 404, "Face thumbnail unavailable");
+    res.setHeader("Cache-Control", "private, max-age=604800, immutable");
+    res.sendFile(thumb);
+  } catch {
+    fail(res, 404, "Face thumbnail unavailable");
+  }
 });
 
 router.get("/faces/clusters", (_req, res) => {

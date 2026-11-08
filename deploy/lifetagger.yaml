@@ -191,7 +191,7 @@ metadata:
   labels:
     auto-backup: "true"
   annotations:
-    backup.infra/exclude: "thumbs,previews,models"
+    backup.infra/exclude: "thumbs,previews,face-thumbs,models"
 spec:
   accessModes:
     - ReadWriteMany

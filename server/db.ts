@@ -143,6 +143,8 @@ CREATE TABLE IF NOT EXISTS faces (
   bbox TEXT NOT NULL,
   embedding BLOB NOT NULL,
   person_tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL,
+  label_source TEXT,
+  label_confidence REAL,
   quality REAL NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
@@ -156,6 +158,55 @@ CREATE TABLE IF NOT EXISTS push_subscriptions (
   last_seen TEXT NOT NULL,
   failures INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS automation_runs (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  options TEXT NOT NULL DEFAULT '{}',
+  processed INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  auto_added INTEGER NOT NULL DEFAULT 0,
+  review_added INTEGER NOT NULL DEFAULT 0,
+  errors INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS face_label_events (
+  id INTEGER PRIMARY KEY,
+  face_id INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  person_tag_id INTEGER REFERENCES tags(id) ON DELETE SET NULL,
+  source TEXT NOT NULL,
+  confidence REAL,
+  run_id INTEGER REFERENCES automation_runs(id) ON DELETE SET NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_face_label_events_face ON face_label_events(face_id);
+
+CREATE TABLE IF NOT EXISTS automation_suggestions (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER REFERENCES automation_runs(id) ON DELETE SET NULL,
+  kind TEXT NOT NULL,
+  file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  face_id INTEGER REFERENCES faces(id) ON DELETE CASCADE,
+  subject_id INTEGER NOT NULL DEFAULT 0,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  value_norm TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0,
+  distance_m REAL,
+  details TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  decided_at TEXT,
+  UNIQUE(kind, file_id, subject_id, key, value_norm)
+);
+CREATE INDEX IF NOT EXISTS idx_automation_suggestions_status
+  ON automation_suggestions(status, kind, confidence);
+CREATE INDEX IF NOT EXISTS idx_automation_suggestions_file
+  ON automation_suggestions(file_id);
 
 CREATE TABLE IF NOT EXISTS legacy_tags (
   legacy_value TEXT PRIMARY KEY,
@@ -178,6 +229,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(name, description, tags)
 
 export const db = new DatabaseSync(config.dbPath);
 db.exec(schema);
+
+function ensureColumn(table: string, column: string, definition: string) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as {
+    name: string;
+  }[];
+  if (!columns.some((entry) => entry.name === column))
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+}
+ensureColumn("faces", "label_source", "label_source TEXT");
+ensureColumn("faces", "label_confidence", "label_confidence REAL");
 
 const statementCache = new Map<
   string,
@@ -245,6 +306,11 @@ export function ensureDefaults(): void {
     suggestionRadiusM: String(config.suggestionRadiusM),
     facesEnabled: config.facesEnabled ? "true" : "false",
     faceScanMode: config.faceScanMode,
+    faceAutoThreshold: String(config.faceAutoThreshold),
+    faceAutoMargin: String(config.faceAutoMargin),
+    faceMinQuality: String(config.faceMinQuality),
+    placeAutoRadiusM: String(config.placeAutoRadiusM),
+    placeReviewRadiusM: String(config.placeReviewRadiusM),
   };
   for (const [key, value] of Object.entries(defaults)) {
     if (getSetting(key) === null) setSetting(key, value);
@@ -292,13 +358,12 @@ export function fileRowByPath(relativePath: string): FileRow | null {
 }
 
 export function tagsForFile(fileId: number): Tag[] {
-  const rows = statement(
-    `SELECT t.key, t.value FROM tags t
+  return statement(
+    `SELECT t.key, t.value, ft.source FROM tags t
      JOIN file_tags ft ON ft.tag_id = t.id
      WHERE ft.file_id = ?
      ORDER BY t.key, t.value`,
-  ).all(fileId) as { key: string; value: string }[];
-  return rows;
+  ).all(fileId) as { key: string; value: string; source: string }[];
 }
 
 export function tagRowsForFiles(fileIds: number[]): Map<number, Tag[]> {
@@ -306,14 +371,19 @@ export function tagRowsForFiles(fileIds: number[]): Map<number, Tag[]> {
   if (fileIds.length === 0) return result;
   const placeholders = fileIds.map(() => "?").join(",");
   const rows = statement(
-    `SELECT ft.file_id, t.key, t.value FROM tags t
+    `SELECT ft.file_id, t.key, t.value, ft.source FROM tags t
      JOIN file_tags ft ON ft.tag_id = t.id
      WHERE ft.file_id IN (${placeholders})
      ORDER BY t.key, t.value`,
-  ).all(...fileIds) as { file_id: number; key: string; value: string }[];
+  ).all(...fileIds) as {
+    file_id: number;
+    key: string;
+    value: string;
+    source: string;
+  }[];
   for (const row of rows) {
     const list = result.get(row.file_id) ?? [];
-    list.push({ key: row.key, value: row.value });
+    list.push({ key: row.key, value: row.value, source: row.source });
     result.set(row.file_id, list);
   }
   return result;
@@ -389,6 +459,29 @@ export function addFaceTag(fileId: number, person: string): void {
 
 export function addTagToFile(fileId: number, tag: Tag, source = "user"): void {
   replaceFileTags(fileId, [...tagsForFile(fileId), tag], source);
+}
+
+/** Promote a tag (and matching face label) to a trusted source. */
+export function promoteFileTagSource(
+  fileId: number,
+  key: string,
+  value: string,
+  source: string,
+): boolean {
+  const row = statement(
+    `SELECT t.id AS tag_id FROM tags t JOIN file_tags ft ON ft.tag_id = t.id
+     WHERE ft.file_id = ? AND t.key = ? AND t.value_norm = ?`,
+  ).get(fileId, key, valueNorm(value)) as { tag_id: number } | undefined;
+  if (!row) return false;
+  statement(
+    "UPDATE file_tags SET source = ? WHERE file_id = ? AND tag_id = ?",
+  ).run(source, fileId, row.tag_id);
+  if (key === "people") {
+    statement(
+      "UPDATE faces SET label_source = ? WHERE file_id = ? AND person_tag_id = ? AND label_source = 'face-auto'",
+    ).run(source, fileId, row.tag_id);
+  }
+  return true;
 }
 
 /** Remove a tag only when it was added by the expected subsystem. */
@@ -1008,12 +1101,20 @@ export function allTagValues(): {
   key: string;
   value: string;
   count: number;
+  autoCount: number;
 }[] {
   return statement(
-    `SELECT t.key, t.value, COUNT(*) AS count FROM tags t
+    `SELECT t.key, t.value, COUNT(*) AS count,
+       SUM(CASE WHEN ft.source IN ('face-auto', 'place-auto') THEN 1 ELSE 0 END) AS autoCount
+     FROM tags t
      JOIN file_tags ft ON ft.tag_id = t.id
      GROUP BY t.id ORDER BY t.key, count DESC`,
-  ).all() as { key: string; value: string; count: number }[];
+  ).all() as {
+    key: string;
+    value: string;
+    count: number;
+    autoCount: number;
+  }[];
 }
 
 export function setTagKey(key: string, multiValue: boolean): void {
@@ -1073,6 +1174,8 @@ export type FaceRow = {
   bbox: string;
   embedding: Uint8Array;
   person_tag_id: number | null;
+  label_source: string | null;
+  label_confidence: number | null;
   quality: number;
   label: string | null;
 };
@@ -1114,19 +1217,40 @@ export function replaceFacesForFile(
 export function setFaceLabel(
   faceId: number,
   person: string | null,
+  options: {
+    source?: string;
+    confidence?: number | null;
+    runId?: number | null;
+  } = {},
 ): { fileId: number; personTagId: number | null } | null {
   const face = statement("SELECT file_id FROM faces WHERE id = ?").get(
     faceId,
   ) as { file_id: number } | undefined;
   if (!face) return null;
+  const source = options.source ?? "manual";
   if (!person) {
-    statement("UPDATE faces SET person_tag_id = NULL WHERE id = ?").run(faceId);
+    statement(
+      "UPDATE faces SET person_tag_id = NULL, label_source = NULL, label_confidence = NULL WHERE id = ?",
+    ).run(faceId);
+    statement(
+      "INSERT INTO face_label_events(face_id, file_id, person_tag_id, source, confidence, run_id, created_at) VALUES(?, ?, NULL, ?, NULL, ?, ?)",
+    ).run(faceId, face.file_id, source, options.runId ?? null, now());
     return { fileId: face.file_id, personTagId: null };
   }
   const tagId = upsertTag({ key: "people", value: person });
-  statement("UPDATE faces SET person_tag_id = ? WHERE id = ?").run(
-    tagId,
+  statement(
+    "UPDATE faces SET person_tag_id = ?, label_source = ?, label_confidence = ? WHERE id = ?",
+  ).run(tagId, source, options.confidence ?? null, faceId);
+  statement(
+    "INSERT INTO face_label_events(face_id, file_id, person_tag_id, source, confidence, run_id, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+  ).run(
     faceId,
+    face.file_id,
+    tagId,
+    source,
+    options.confidence ?? null,
+    options.runId ?? null,
+    now(),
   );
   return { fileId: face.file_id, personTagId: tagId };
 }
@@ -1138,6 +1262,18 @@ export function labeledFaces(): (FaceRow & { file_path: string })[] {
      WHERE f.person_tag_id IS NOT NULL
      ORDER BY f.quality DESC
      LIMIT 5000`,
+  ).all() as (FaceRow & { file_path: string })[];
+}
+
+/** Labels that may be used to seed automation. Auto labels are intentionally excluded. */
+export function referenceFaces(): (FaceRow & { file_path: string })[] {
+  return statement(
+    `SELECT f.*, t.value AS label, files.path AS file_path
+     FROM faces f JOIN tags t ON t.id = f.person_tag_id JOIN files ON files.id = f.file_id
+     WHERE f.person_tag_id IS NOT NULL
+       AND COALESCE(f.label_source, 'manual') IN ('manual', 'tag-sync', 'review')
+     ORDER BY f.quality DESC
+     LIMIT 10000`,
   ).all() as (FaceRow & { file_path: string })[];
 }
 

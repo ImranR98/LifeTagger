@@ -6,7 +6,7 @@ import sharp from "sharp";
 import { exiftool } from "exiftool-vendored";
 import { config, serverLog } from "./config";
 import type { FileRow } from "./db";
-import { getMediaRoot } from "./db";
+import { faceForId, fileRowById, getMediaRoot } from "./db";
 
 const execFileAsync = promisify(execFile);
 const running = new Map<string, Promise<string>>();
@@ -147,6 +147,47 @@ export async function getThumbnail(row: FileRow): Promise<string> {
 
 export async function getPreview(row: FileRow): Promise<string> {
   return ensureImage(row, previewPath(row), config.previewMaxPx);
+}
+
+export async function getFaceThumbnail(faceId: number): Promise<string | null> {
+  const face = faceForId(faceId);
+  if (!face) return null;
+  const target = path.join(config.faceThumbsDir, `${faceId}.jpg`);
+  if (fs.existsSync(target) && (await fs.promises.stat(target)).size > 0)
+    return target;
+  const file = fileRowById(face.file_id);
+  if (!file) return null;
+  const preview = await getPreview(file);
+  await fs.promises.mkdir(config.faceThumbsDir, { recursive: true });
+  const bbox = JSON.parse(face.bbox) as {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  };
+  const meta = await sharp(preview).metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  if (width <= 0 || height <= 0) return null;
+  const pad = 0.18;
+  const left = Math.max(0, Math.floor((bbox.x - bbox.w * pad) * width));
+  const top = Math.max(0, Math.floor((bbox.y - bbox.h * pad) * height));
+  const right = Math.min(
+    width,
+    Math.ceil((bbox.x + bbox.w * (1 + pad)) * width),
+  );
+  const bottom = Math.min(
+    height,
+    Math.ceil((bbox.y + bbox.h * (1 + pad)) * height),
+  );
+  const cropWidth = Math.max(1, right - left);
+  const cropHeight = Math.max(1, bottom - top);
+  await sharp(preview)
+    .extract({ left, top, width: cropWidth, height: cropHeight })
+    .resize({ width: 320, height: 320, fit: "cover" })
+    .jpeg({ quality: 82, progressive: true })
+    .toFile(target);
+  return target;
 }
 
 export async function generateBatchAssets(rows: FileRow[]): Promise<void> {

@@ -209,6 +209,16 @@ a {
   font-weight: 700;
 }
 
+.chip-auto {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.16);
+  color: #fcd34d;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
 .chip-remove {
   display: inline-flex;
   align-items: center;
@@ -262,8 +272,8 @@ a {
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  min-width: 58px;
-  padding: 6px 8px;
+  min-width: 52px;
+  padding: 6px 5px;
   border-radius: 12px;
   color: var(--muted);
   font-size: 10px;

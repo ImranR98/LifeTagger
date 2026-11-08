@@ -117,6 +117,7 @@ export const config = {
   dbPath: path.join(dataDir, "lifetagger.db"),
   thumbsDir: path.join(dataDir, "thumbs"),
   previewsDir: path.join(dataDir, "previews"),
+  faceThumbsDir: path.join(dataDir, "face-thumbs"),
   modelsDir: path.join(dataDir, "models"),
   metadataBackupsDir: path.join(dataDir, "metadata-backups"),
   dbSnapshotsDir: path.join(dataDir, "db-snapshots"),
@@ -153,6 +154,13 @@ export const config = {
   faceMatchThreshold: Number.parseFloat(
     process.env.FACE_MATCH_THRESHOLD || "0.55",
   ),
+  faceAutoThreshold: Number.parseFloat(
+    process.env.FACE_AUTO_THRESHOLD || "0.72",
+  ),
+  faceAutoMargin: Number.parseFloat(process.env.FACE_AUTO_MARGIN || "0.06"),
+  faceMinQuality: Number.parseFloat(process.env.FACE_MIN_QUALITY || "0.55"),
+  placeAutoRadiusM: Math.max(1, int(process.env.PLACE_AUTO_RADIUS_M, 50)),
+  placeReviewRadiusM: Math.max(50, int(process.env.PLACE_REVIEW_RADIUS_M, 500)),
   previewMaxPx: Math.max(640, int(process.env.PREVIEW_MAX_PX, 2048)),
   thumbPx: Math.max(160, int(process.env.THUMB_PX, 480)),
   indexIntervalMinutes: Math.max(0, int(process.env.INDEX_INTERVAL_MIN, 30)),
@@ -170,6 +178,7 @@ export const config = {
 for (const dir of [
   config.thumbsDir,
   config.previewsDir,
+  config.faceThumbsDir,
   config.modelsDir,
   config.metadataBackupsDir,
   config.dbSnapshotsDir,

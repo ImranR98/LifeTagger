@@ -12,6 +12,7 @@ import {
   ArrowRightLeft,
   ArrowRight,
   AlertTriangle,
+  ListChecks,
 } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import { api } from "../api";
@@ -28,6 +29,14 @@ function taskLabel(kind: string): string {
       return "Removing tag values";
     case "cluster-label":
       return "Naming faces";
+    case "face-scan":
+      return "Scanning all faces";
+    case "face-auto":
+      return "Matching known faces";
+    case "place-auto":
+      return "Propagating place tags";
+    case "review-apply":
+      return "Applying review suggestions";
     default:
       return "Working";
   }
@@ -36,6 +45,7 @@ function taskLabel(kind: string): string {
 const links = [
   { to: "/today", label: "Today", icon: Sparkles },
   { to: "/library", label: "Library", icon: Library },
+  { to: "/review", label: "Review", icon: ListChecks },
   { to: "/people", label: "People", icon: Users },
   { to: "/tags", label: "Tags", icon: Tags },
   { to: "/stats", label: "Stats", icon: BarChart3 },
@@ -145,11 +155,26 @@ export function Layout({ children }: { children: ReactNode }) {
                   <Loader2 size={16} className="shrink-0 animate-spin" />
                   <span className="flex-1 font-semibold">
                     {taskLabel(task.kind)}
+                    {task.phase ? ` · ${task.phase}` : ""}
                   </span>
                   <span className="tabular-nums text-xs text-sky-200">
                     {task.processed.toLocaleString()}
                     {task.total > 0 ? ` / ${task.total.toLocaleString()}` : ""}
                   </span>
+                  {!task.cancelRequested &&
+                    [
+                      "face-scan",
+                      "face-auto",
+                      "place-auto",
+                      "review-apply",
+                    ].includes(task.kind) && (
+                      <button
+                        className="btn px-2 py-1 text-[11px]"
+                        onClick={() => api.cancelTask().catch(() => undefined)}
+                      >
+                        Cancel
+                      </button>
+                    )}
                 </div>
                 {task.total > 0 && (
                   <div className="progress-track mt-2 h-1">
@@ -195,7 +220,7 @@ export function Layout({ children }: { children: ReactNode }) {
         </main>
       </div>
       <nav className="nav">
-        {links.slice(0, 5).map((link) => (
+        {links.slice(0, 6).map((link) => (
           <NavLink
             key={link.to}
             to={link.to}

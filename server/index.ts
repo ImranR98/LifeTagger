@@ -10,6 +10,10 @@ import { startPushScheduler } from "./push";
 import { startDbSnapshots, stopDbSnapshots } from "./backup";
 import { isTaskRunning } from "./tasks";
 
+db.prepare(
+  "UPDATE automation_runs SET status = 'interrupted', finished_at = COALESCE(finished_at, ?) WHERE status = 'running'",
+).run(new Date().toISOString());
+
 const app = express();
 app.set("trust proxy", true);
 app.disable("x-powered-by");

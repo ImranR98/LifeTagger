@@ -37,7 +37,9 @@ export default function TodayPage() {
   const [undoId, setUndoId] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const taskBusy = Boolean(status.data?.task?.running);
+  const taskBusy = Boolean(
+    status.data?.task?.running && status.data.task.kind !== "face-scan",
+  );
   const item = batch.data?.items[0];
   const suggestions = (item?.suggestions ?? []).filter(
     (suggestion) => !rejected.has(`${suggestion.key}\u0000${suggestion.value}`),
@@ -107,6 +109,14 @@ export default function TodayPage() {
   const more = useMutation({
     mutationFn: () => api.more(batch.data?.date),
     onSuccess: () => client.invalidateQueries({ queryKey: ["batch"] }),
+  });
+
+  const confirmTag = useMutation({
+    mutationFn: (tag: Tag) => api.confirmTag(item!.id, tag.key, tag.value),
+    onSuccess: () => {
+      client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["tags"] });
+    },
   });
 
   if (batch.isLoading) {
@@ -268,6 +278,7 @@ export default function TodayPage() {
               keys={tagsQuery.data?.keys.map((entry) => entry.key)}
               values={tagsQuery.data?.values}
               onChange={setTags}
+              onConfirmTag={(tag) => confirmTag.mutate(tag)}
               onSuggested={(suggestion) => {
                 setRejected((current) =>
                   new Set(current).add(
