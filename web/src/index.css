@@ -90,6 +90,7 @@ a {
 }
 
 .card {
+  min-width: 0;
   background: color-mix(in srgb, var(--panel) 92%, transparent);
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -209,6 +210,9 @@ a {
 }
 
 .chip-key {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   color: var(--accent);
   font-weight: 700;
 }

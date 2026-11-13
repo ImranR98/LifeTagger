@@ -122,7 +122,7 @@ export function TagEditor({
   const hasSuggestions = suggestions.length > 0;
 
   return (
-    <div className="space-y-3">
+    <div className="min-w-0 space-y-3">
       {hasSuggestions && (
         <div>
           <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-teal-300">
@@ -145,7 +145,7 @@ export function TagEditor({
                 >
                   <span className="flex min-w-0 items-center gap-2 text-sm font-semibold">
                     <Check size={15} className="shrink-0 text-teal-300" />
-                    <span className="shrink-0 text-teal-300">
+                    <span className="min-w-0 max-w-[45%] shrink truncate text-teal-300">
                       {suggestion.key}
                     </span>
                     <span className="min-w-0 flex-1 truncate">
@@ -184,7 +184,7 @@ export function TagEditor({
             No tags yet. Add one below or tap a suggestion.
           </p>
         ) : (
-          <div className="flex flex-wrap gap-2">
+          <div className="flex min-w-0 flex-wrap gap-2">
             {groups.flatMap((group) =>
               group.values.map((value) => (
                 <span key={`${group.key}:${value}`} className="chip">

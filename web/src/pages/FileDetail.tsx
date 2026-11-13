@@ -165,7 +165,7 @@ export default function FileDetailPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
-        <div className="space-y-3">
+        <div className="min-w-0 space-y-3">
           <MediaViewer
             file={detail}
             faces={detail.faces}
@@ -248,7 +248,7 @@ export default function FileDetailPage() {
           </div>
         </div>
 
-        <div className="space-y-3">
+        <div className="min-w-0 space-y-3">
           <div className="card p-4">
             <TagEditor
               tags={tags}
