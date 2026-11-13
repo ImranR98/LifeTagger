@@ -132,22 +132,28 @@ export const api = {
     untagged?: boolean;
     key?: string;
     value?: string;
-    cursor?: number;
+    cursor?: string;
     limit?: number;
     sort?: string;
   }) =>
     request<{
       files: FileSummary[];
-      cursor: number | null;
+      cursor: string | null;
       hasMore: boolean;
     }>(`/api/files${query(params)}`),
   file: (id: number) => request<FileDetail>(`/api/files/${id}`),
-  save: (id: number, tags: Tag[], description: string, date?: string) =>
+  save: (
+    id: number,
+    tags: Tag[],
+    description: string,
+    date?: string,
+    tagsRevision?: number,
+  ) =>
     request<FileDetail & { undoId: number; metadataWritable: boolean }>(
       `/api/files/${id}`,
       {
         method: "PATCH",
-        body: JSON.stringify({ tags, description, date }),
+        body: JSON.stringify({ tags, description, date, tagsRevision }),
       },
     ),
   undo: (undoId: number, date?: string) =>
@@ -204,10 +210,13 @@ export const api = {
     }),
 
   confirmTag: (fileId: number, key: string, value: string) =>
-    request<{ ok: boolean }>(`/api/files/${fileId}/tags/confirm`, {
-      method: "POST",
-      body: JSON.stringify({ key, value }),
-    }),
+    request<{ ok: boolean; tagsRevision: number | null }>(
+      `/api/files/${fileId}/tags/confirm`,
+      {
+        method: "POST",
+        body: JSON.stringify({ key, value }),
+      },
+    ),
 
   runPlaceAutomation: () =>
     request<{ started: boolean; reason?: string }>(

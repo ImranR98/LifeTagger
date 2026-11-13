@@ -112,13 +112,17 @@ export default function PeoplePage() {
           <div className="space-y-3">
             {clusters.data.clusters.map((cluster) => (
               <ClusterCard
-                key={cluster.id}
+                key={cluster.faces[0]?.faceId ?? cluster.id}
                 cluster={cluster}
                 disabled={busy}
                 onNamed={() => {
                   client.invalidateQueries({ queryKey: ["clusters"] });
                   client.invalidateQueries({ queryKey: ["people"] });
                   client.invalidateQueries({ queryKey: ["status"] });
+                  client.invalidateQueries({ queryKey: ["tags"] });
+                  client.invalidateQueries({ queryKey: ["files"] });
+                  client.invalidateQueries({ queryKey: ["batch"] });
+                  client.invalidateQueries({ queryKey: ["stats"] });
                 }}
               />
             ))}
@@ -144,7 +148,7 @@ function ClusterCard({
     size: number;
     faceIds: number[];
     representativeFileId: number | null;
-    faces: { fileId: number; name: string }[];
+    faces: { faceId: number; fileId: number; name: string }[];
   };
   disabled?: boolean;
   onNamed: () => void;
@@ -163,7 +167,7 @@ function ClusterCard({
         <div className="flex -space-x-2">
           {cluster.faces.slice(0, 5).map((face) => (
             <img
-              key={face.fileId}
+              key={face.faceId}
               src={`/api/files/${face.fileId}/thumb`}
               alt=""
               className="h-10 w-10 rounded-full border-2 border-[#121923] object-cover"
@@ -189,6 +193,7 @@ function ClusterCard({
       >
         <input
           className="input"
+          aria-label="Name this person"
           placeholder="Who is this?"
           value={name}
           disabled={disabled}

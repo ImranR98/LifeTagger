@@ -3,7 +3,7 @@ import path from "node:path";
 import util from "node:util";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
-import { hasLegacyTags, valueNorm } from "../shared/tag-format";
+import { hasLegacyTags, normalizeValue, valueNorm } from "../shared/tag-format";
 import type { Face } from "../shared/types";
 import { config, serverLog } from "./config";
 import {
@@ -22,12 +22,14 @@ import {
   replaceFacesForFile,
   setFaceLabel,
   tagsForFile,
+  promoteFileTagSource,
   unknownFaces,
   updateFileAfterWrite,
 } from "./db";
-import { absolutePathFor, getPreview } from "./media";
+import { absolutePathFor, cleanFaceThumbs, getPreview } from "./media";
 import { writeMetadata } from "./metadata";
 import { beginTask, finishTask, isTaskRunning, updateTask } from "./tasks";
+import { withFileLock } from "./file-lock";
 
 type HumanFace = {
   box: [number, number, number, number];
@@ -152,6 +154,7 @@ async function getHuman(): Promise<HumanLike | null> {
       return human;
     })().catch((error) => {
       serverLog.error("face model load failed", error);
+      humanPromise = null;
       return null;
     });
   }
@@ -173,65 +176,110 @@ export async function processFacesForFile(
 ): Promise<void> {
   if (!facesAvailable()) return;
   if (!options.force && isTaskRunning()) return;
-  if (file.faces_processed !== 0) return;
+  if (file.faces_processed === 1) return;
   const human = await getHuman();
   if (!human) {
     markFacesFailed(file.id);
     return;
   }
   try {
-    const preview = await getPreview(file);
-    const { data, info } = await sharp(preview)
-      .rotate()
-      .resize({
-        width: 1280,
-        height: 1280,
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .removeAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-    const tensor = human.tf.tensor3d(new Uint8Array(data), [
-      info.height,
-      info.width,
-      3,
-    ]);
-    let result: { face: HumanFace[] };
-    try {
-      result = await human.detect(tensor);
-    } finally {
-      tensor.dispose();
-    }
-    const faces = result.face
-      .filter(
-        (face) =>
-          face.embedding &&
-          face.embedding.length > 0 &&
-          face.score >= config.faceMinConfidence,
-      )
-      .map((face) => ({
-        bbox: {
-          x: Math.max(0, face.box[0] / info.width),
-          y: Math.max(0, face.box[1] / info.height),
-          w: Math.min(1, face.box[2] / info.width),
-          h: Math.min(1, face.box[3] / info.height),
-        },
-        embedding: face.embedding as number[],
-        quality: face.score,
-      }));
-    replaceFacesForFile(file.id, faces);
-    const people = tagsForFile(file.id).filter((tag) => tag.key === "people");
-    if (faces.length === 1 && people.length === 1) {
-      const stored = facesForFile(file.id)[0];
-      if (stored)
-        setFaceLabel(stored.id, people[0]!.value, {
+    await withFileLock(file.id, async () => {
+      const fresh = fileRowById(file.id) ?? file;
+      if (fresh.faces_processed === 1) return;
+      const previousFaces = facesForFile(file.id);
+      const previous = previousFaces.filter((face) => face.label);
+      const people = tagsForFile(file.id).filter((tag) => tag.key === "people");
+      const preview = await getPreview(fresh);
+      const { data, info } = await sharp(preview)
+        .rotate()
+        .resize({
+          width: 1280,
+          height: 1280,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .toColourspace("srgb")
+        .removeAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      const tensor = human.tf.tensor3d(new Uint8Array(data), [
+        info.height,
+        info.width,
+        3,
+      ]);
+      let result: { face: HumanFace[] };
+      try {
+        result = await human.detect(tensor);
+      } finally {
+        tensor.dispose();
+      }
+      const faces = result.face
+        .filter(
+          (face) =>
+            face.embedding &&
+            face.embedding.length > 0 &&
+            face.score >= config.faceMinConfidence,
+        )
+        .map((face) => ({
+          bbox: {
+            x: Math.max(0, face.box[0] / info.width),
+            y: Math.max(0, face.box[1] / info.height),
+            w: Math.min(1, face.box[2] / info.width),
+            h: Math.min(1, face.box[3] / info.height),
+          },
+          embedding: face.embedding as number[],
+          quality: face.score,
+        }));
+      replaceFacesForFile(file.id, faces);
+      await cleanFaceThumbs(previousFaces.map((face) => face.id));
+      const stored = facesForFile(file.id);
+      for (const face of stored) {
+        const embedding = embeddingToArray(face.embedding);
+        let best: {
+          face: FaceRow & { label: string | null };
+          score: number;
+        } | null = null;
+        for (const old of previous) {
+          if (!old.label) continue;
+          const personTag = people.find(
+            (tag) => valueNorm(tag.value) === valueNorm(old.label!),
+          );
+          if (!personTag) continue;
+          const score = cosine(embedding, embeddingToArray(old.embedding));
+          if (
+            score >= config.faceMatchThreshold &&
+            (!best || score > best.score)
+          )
+            best = { face: old, score };
+        }
+        if (best?.face.label) {
+          const personTag = people.find(
+            (tag) => valueNorm(tag.value) === valueNorm(best!.face.label!),
+          );
+          setFaceLabel(face.id, best.face.label, {
+            source:
+              personTag?.source === "face-auto" ? "face-auto" : "tag-sync",
+            confidence: personTag?.source === "face-auto" ? best.score : 1,
+          });
+        }
+      }
+      const trustedPeople = people.filter(
+        (tag) => tag.source !== "face-auto" && tag.source !== "place-auto",
+      );
+      const freshFaces = facesForFile(file.id);
+      if (
+        freshFaces.length === 1 &&
+        trustedPeople.length === 1 &&
+        freshFaces[0]!.person_tag_id === null
+      ) {
+        setFaceLabel(freshFaces[0]!.id, trustedPeople[0]!.value, {
           source: "tag-sync",
           confidence: 1,
         });
-    }
-    invalidateKnownFaces();
-    serverLog.info("faces processed", file.path, faces.length);
+      }
+      invalidateKnownFaces();
+      serverLog.info("faces processed", file.path, faces.length);
+    });
   } catch (error) {
     markFacesFailed(file.id);
     serverLog.warn("face processing failed", file.path, error);
@@ -316,12 +364,16 @@ export function faceSuggestionsForFile(
  * future suggestions. This also covers tags added after face detection.
  */
 export function syncFaceLabelForFile(fileId: number): boolean {
-  if (isTaskRunning()) return false;
   const faces = facesForFile(fileId);
   if (faces.length !== 1) return false;
   const face = faces[0]!;
   if (face.person_tag_id !== null) return false;
-  const people = tagsForFile(fileId).filter((tag) => tag.key === "people");
+  const people = tagsForFile(fileId).filter(
+    (tag) =>
+      tag.key === "people" &&
+      tag.source !== "face-auto" &&
+      tag.source !== "place-auto",
+  );
   if (people.length !== 1) return false;
   setFaceLabel(face.id, people[0]!.value, {
     source: "tag-sync",
@@ -329,6 +381,23 @@ export function syncFaceLabelForFile(fileId: number): boolean {
   });
   invalidateKnownFaces();
   return true;
+}
+
+/** Clear face labels whose people tag was removed from the file. */
+export function reconcileFaceLabelsForFile(fileId: number): number {
+  const people = new Set(
+    tagsForFile(fileId)
+      .filter((tag) => tag.key === "people")
+      .map((tag) => valueNorm(tag.value)),
+  );
+  let cleared = 0;
+  for (const face of facesForFile(fileId)) {
+    if (!face.label || people.has(valueNorm(face.label))) continue;
+    setFaceLabel(face.id, null, { source: "tag-sync" });
+    cleared++;
+  }
+  if (cleared > 0) invalidateKnownFaces();
+  return cleared;
 }
 
 /** Backfill unambiguous face labels from people tags after indexing. */
@@ -341,10 +410,12 @@ export function labelUnambiguousPeopleFaces(limit = 1000): number {
        JOIN file_tags ft ON ft.file_id = f.file_id
        JOIN tags t ON t.id = ft.tag_id AND t.key = 'people'
        WHERE f.person_tag_id IS NULL
+         AND ft.source NOT IN ('face-auto', 'place-auto')
          AND (SELECT COUNT(*) FROM faces f2 WHERE f2.file_id = f.file_id) = 1
          AND (SELECT COUNT(*) FROM file_tags ft2
               JOIN tags t2 ON t2.id = ft2.tag_id
-              WHERE ft2.file_id = f.file_id AND t2.key = 'people') = 1
+              WHERE ft2.file_id = f.file_id AND t2.key = 'people'
+                AND ft2.source NOT IN ('face-auto', 'place-auto')) = 1
        LIMIT ?`,
     )
     .all(limit) as { face_id: number; person: string }[];
@@ -374,33 +445,54 @@ export function faceListForFile(fileId: number): Face[] {
   }));
 }
 
-export async function labelFace(
+function applyFaceLabelUnlocked(
   faceId: number,
-  person: string | null,
-): Promise<{ fileId: number } | null> {
-  if (isTaskRunning())
-    throw new Error("Wait for the current task to finish before labeling");
+  cleanPerson: string | null,
+): { fileId: number; previous: string | null } | null {
   const previous = faceForId(faceId)?.label ?? null;
-  const result = setFaceLabel(faceId, person);
-  if (!result) return null;
-  if (person) {
-    addTagToFile(result.fileId, { key: "people", value: person }, "face");
+  const updated = setFaceLabel(faceId, cleanPerson);
+  if (!updated) return null;
+  if (cleanPerson) {
+    addTagToFile(updated.fileId, { key: "people", value: cleanPerson }, "face");
+    promoteFileTagSource(updated.fileId, "people", cleanPerson, "face");
   }
-  if (previous && (!person || valueNorm(previous) !== valueNorm(person))) {
-    const stillUsed = facesForFile(result.fileId).some(
-      (face) => face.id !== faceId && face.label === previous,
+  if (
+    previous &&
+    (!cleanPerson || valueNorm(previous) !== valueNorm(cleanPerson))
+  ) {
+    const stillUsed = facesForFile(updated.fileId).some(
+      (other) => other.id !== faceId && other.label === previous,
     );
     if (!stillUsed) {
-      for (const source of ["face", "face-auto"]) {
+      for (const source of ["face", "face-auto", "review"]) {
         removeTagFromFileIfSource(
-          result.fileId,
+          updated.fileId,
           { key: "people", value: previous },
           source,
         );
       }
     }
   }
-  if (person || previous) await persistFileTags(result.fileId);
+  return { fileId: updated.fileId, previous };
+}
+
+export async function labelFace(
+  faceId: number,
+  person: string | null,
+): Promise<{ fileId: number } | null> {
+  if (isTaskRunning())
+    throw new Error("Wait for the current task to finish before labeling");
+  const face = faceForId(faceId);
+  if (!face) return null;
+  const cleanPerson = person ? normalizeValue(person) : null;
+  if (person && !cleanPerson) return { fileId: face.file_id };
+  const result = await withFileLock(face.file_id, async () => {
+    const updated = applyFaceLabelUnlocked(faceId, cleanPerson);
+    if (!updated) return null;
+    if (cleanPerson || updated.previous) await persistFileTags(updated.fileId);
+    return updated;
+  });
+  if (!result) return null;
   invalidateKnownFaces();
   return { fileId: result.fileId };
 }
@@ -442,7 +534,8 @@ async function persistLabeledFiles(
 ): Promise<void> {
   let errors = 0;
   for (let index = 0; index < fileIds.length; index++) {
-    const ok = await persistFileTags(fileIds[index]!);
+    const fileId = fileIds[index]!;
+    const ok = await withFileLock(fileId, () => persistFileTags(fileId));
     if (!ok) errors++;
     updateTask({ processed: index + 1, errors });
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -526,7 +619,7 @@ export function unknownFaceClusters(): FaceCluster[] {
     .sort((a, b) => b.faces.length - a.faces.length)
     .slice(0, 30)
     .map((cluster, index) => ({
-      id: index,
+      id: cluster.faces[0]?.id ?? index,
       faces: cluster.faces.slice(0, 12).map((face) => ({
         faceId: face.id,
         fileId: face.file_id,
@@ -567,13 +660,18 @@ export async function labelCluster(
   let updated = 0;
   const touched = new Set<number>();
   try {
-    for (const faceId of faceIds) {
+    for (const faceId of new Set(faceIds)) {
       const face = faceForId(faceId);
       if (!face) continue;
-      setFaceLabel(faceId, person);
-      addTagToFile(face.file_id, { key: "people", value: person }, "face");
-      touched.add(face.file_id);
-      updated++;
+      const cleanPerson = normalizeValue(person);
+      if (!cleanPerson) continue;
+      await withFileLock(face.file_id, async () => {
+        const result = applyFaceLabelUnlocked(faceId, cleanPerson);
+        if (result) {
+          touched.add(result.fileId);
+          updated++;
+        }
+      });
     }
   } catch (error) {
     finishTask(

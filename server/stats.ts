@@ -14,6 +14,7 @@ function days(): DayRow[] {
 
 function previousDay(date: string): string {
   const parsed = new Date(`${date}T00:00:00Z`);
+  if (!Number.isFinite(parsed.getTime())) return "";
   parsed.setUTCDate(parsed.getUTCDate() - 1);
   return parsed.toISOString().slice(0, 10);
 }
@@ -58,6 +59,7 @@ export function stats(): StatsResponse {
       .get(todayKey()) as { count: number }
   ).count;
   return {
+    today: todayKey(),
     streak: streak.current,
     longestStreak: streak.longest,
     totalTagged: totals.totalTagged,

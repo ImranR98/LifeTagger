@@ -1,5 +1,5 @@
 import { NavLink, Link, useLocation } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BarChart3,
   Images,
@@ -14,7 +14,7 @@ import {
   AlertTriangle,
   ListChecks,
 } from "lucide-react";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { api } from "../api";
 
 function taskLabel(kind: string): string {
@@ -54,6 +54,7 @@ const links = [
 ];
 
 export function Layout({ children }: { children: ReactNode }) {
+  const client = useQueryClient();
   const status = useQuery({
     queryKey: ["status"],
     queryFn: api.status,
@@ -69,6 +70,28 @@ export function Layout({ children }: { children: ReactNode }) {
   const task = status.data?.task;
   const location = useLocation();
   const legacyPending = status.data?.counts.legacyPending ?? 0;
+  const wasIndexing = useRef(false);
+  const wasTaskRunning = useRef(false);
+  useEffect(() => {
+    const finishedIndexing = wasIndexing.current && !indexing?.running;
+    const finishedTask = wasTaskRunning.current && !task?.running;
+    wasIndexing.current = Boolean(indexing?.running);
+    wasTaskRunning.current = Boolean(task?.running);
+    if (!finishedIndexing && !finishedTask) return;
+    for (const key of [
+      "batch",
+      "files",
+      "stats",
+      "tags",
+      "people",
+      "clusters",
+      "review",
+      "migration",
+      "status",
+    ]) {
+      client.invalidateQueries({ queryKey: [key] });
+    }
+  }, [client, indexing?.running, task?.running]);
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0 });
   }, [location.pathname]);
@@ -136,7 +159,13 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
           {indexing?.running && (
             <div className="mx-auto mt-2 max-w-3xl">
-              <div className="progress-track h-1">
+              <div
+                className="progress-track h-1"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={indexing.total || undefined}
+                aria-valuenow={indexing.scanned}
+              >
                 <div
                   className="progress-fill"
                   style={{
@@ -181,7 +210,13 @@ export function Layout({ children }: { children: ReactNode }) {
                     )}
                 </div>
                 {task.total > 0 && (
-                  <div className="progress-track mt-2 h-1">
+                  <div
+                    className="progress-track mt-2 h-1"
+                    role="progressbar"
+                    aria-valuemin={0}
+                    aria-valuemax={task.total}
+                    aria-valuenow={task.processed}
+                  >
                     <div
                       className="progress-fill"
                       style={{

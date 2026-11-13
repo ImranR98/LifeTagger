@@ -66,15 +66,18 @@ export default function MigrationPage() {
 
   async function importMapping(file: File) {
     try {
-      const payload = JSON.parse(await file.text()) as {
-        legacyValue: string;
-        key: string;
-        value: string;
-        action: "map" | "skip";
-      }[];
+      const payload = JSON.parse(await file.text()) as unknown;
+      if (!Array.isArray(payload)) throw new Error("not an array");
       const next: Record<string, Draft> = {};
-      for (const entry of payload) {
-        if (!entry.legacyValue) continue;
+      for (const raw of payload) {
+        if (!raw || typeof raw !== "object") throw new Error("invalid row");
+        const entry = raw as Record<string, unknown>;
+        if (typeof entry.legacyValue !== "string" || !entry.legacyValue)
+          continue;
+        if (entry.key !== undefined && typeof entry.key !== "string")
+          throw new Error("invalid key");
+        if (entry.value !== undefined && typeof entry.value !== "string")
+          throw new Error("invalid value");
         next[entry.legacyValue] = {
           key: entry.key ?? "",
           value: entry.value ?? entry.legacyValue,
@@ -126,6 +129,14 @@ export default function MigrationPage() {
       ),
   });
 
+  const wasTaskRunning = useRef(false);
+  useEffect(() => {
+    if (wasTaskRunning.current && !status.data?.task?.running) {
+      autoScanStarted.current = false;
+    }
+    wasTaskRunning.current = Boolean(status.data?.task?.running);
+  }, [status.data?.task?.running]);
+
   useEffect(() => {
     const state = migration.data?.state;
     if (
@@ -136,12 +147,19 @@ export default function MigrationPage() {
       !state.running &&
       !state.errors &&
       !indexing &&
+      !status.data?.task?.running &&
       !scan.isPending
     ) {
       autoScanStarted.current = true;
       scan.mutate();
     }
-  }, [migration.data, scan.isPending, indexing, statusReady]);
+  }, [
+    migration.data,
+    scan.isPending,
+    indexing,
+    statusReady,
+    status.data?.task?.running,
+  ]);
 
   function mappingsFromDrafts() {
     const current = new Set(
@@ -197,6 +215,10 @@ export default function MigrationPage() {
       client.invalidateQueries({ queryKey: ["status"] });
       client.invalidateQueries({ queryKey: ["files"] });
       client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["tags"] });
+      client.invalidateQueries({ queryKey: ["stats"] });
+      client.invalidateQueries({ queryKey: ["people"] });
+      client.invalidateQueries({ queryKey: ["review"] });
     },
     onError: (mutationError) =>
       setError(
@@ -407,19 +429,31 @@ export default function MigrationPage() {
               {state.errors === 1 ? "" : "s"}
             </span>
           </div>
-          <div className="progress-track">
+          <div
+            className="progress-track"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={state.total}
+            aria-valuenow={state.processed}
+          >
             <div className="progress-fill" style={{ width: `${progress}%` }} />
           </div>
         </div>
       )}
 
       {message && (
-        <div className="rounded-xl border border-teal-300/25 bg-teal-300/10 p-3 text-sm text-teal-100">
+        <div
+          role="status"
+          className="rounded-xl border border-teal-300/25 bg-teal-300/10 p-3 text-sm text-teal-100"
+        >
           {message}
         </div>
       )}
       {error && (
-        <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">
+        <div
+          role="alert"
+          className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200"
+        >
           {error}
         </div>
       )}
@@ -458,6 +492,7 @@ export default function MigrationPage() {
               <span className="label">Assign a key to every row</span>
               <input
                 className="input"
+                aria-label="Key to apply to all rows"
                 value={bulkKey}
                 disabled={busy || needsRefresh}
                 onChange={(event) => setBulkKey(event.target.value)}
@@ -552,6 +587,7 @@ function MappingRow({
       <td>
         <input
           className="input min-h-8 min-w-28 py-1 text-xs"
+          aria-label={`Key for ${row.legacyValue}`}
           value={draft.key}
           disabled={skipped || disabled}
           onChange={(event) =>
@@ -563,6 +599,7 @@ function MappingRow({
       <td>
         <input
           className="input min-h-8 min-w-36 py-1 text-xs"
+          aria-label={`Value for ${row.legacyValue}`}
           value={draft.value}
           disabled={skipped || disabled}
           onChange={(event) =>
@@ -573,6 +610,7 @@ function MappingRow({
       <td>
         <input
           type="checkbox"
+          aria-label={`Skip ${row.legacyValue}`}
           checked={skipped}
           disabled={disabled}
           onChange={(event) =>

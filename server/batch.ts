@@ -8,7 +8,6 @@ import {
   appendBatchItems,
   autoOnlyCandidateRows,
   batchItems,
-  candidateRowsForBatch,
   countFiles,
   createBatch,
   fileIsAutoOnly,
@@ -39,36 +38,8 @@ function chooseCandidates(
   amount: number,
   includeAuto: boolean,
 ): ReturnType<typeof untaggedCandidateRows> {
-  const existing = new Set(batchItems(date).map((item) => item.file_id));
-  const seed = untaggedCandidateRows(1, Array.from(existing), includeAuto)[0];
-  if (!seed) return [];
-  const chosen = [seed];
-  const chosenIds = new Set([seed.id, ...existing]);
-  const neighbors = candidateRowsForBatch(
-    seed,
-    amount - 1,
-    Array.from(chosenIds),
-    includeAuto,
-  );
-  for (const row of neighbors) {
-    if (chosenIds.has(row.id)) continue;
-    chosen.push(row);
-    chosenIds.add(row.id);
-    if (chosen.length >= amount) break;
-  }
-  if (chosen.length < amount) {
-    for (const row of untaggedCandidateRows(
-      amount - chosen.length,
-      [...chosenIds, ...existing],
-      includeAuto,
-    )) {
-      if (chosenIds.has(row.id)) continue;
-      chosen.push(row);
-      chosenIds.add(row.id);
-      if (chosen.length >= amount) break;
-    }
-  }
-  return chosen;
+  const existing = batchItems(date).map((item) => item.file_id);
+  return untaggedCandidateRows(amount, existing, includeAuto);
 }
 
 export function getOrCreateBatch(date = todayKey()): BatchResponse {

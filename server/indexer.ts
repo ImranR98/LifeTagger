@@ -5,7 +5,9 @@ import { dedupeTags } from "../shared/tag-format";
 import {
   db,
   deleteMissingFiles,
+  adoptFilePath,
   fileRowByPath,
+  findMovedFileRow,
   getMediaRoot,
   getSetting,
   nextScanGeneration,
@@ -16,12 +18,14 @@ import {
   type FileRow,
 } from "./db";
 import { readMetadata } from "./metadata";
-import { cleanAssetCaches } from "./media";
+import { cleanAssetCaches, cleanFaceThumbs } from "./media";
 import {
   facesAvailable,
   labelUnambiguousPeopleFaces,
   queueFaceProcessing,
+  reconcileFaceLabelsForFile,
 } from "./faces";
+import { withFileLock } from "./file-lock";
 import { isTaskRunning } from "./tasks";
 
 export type IndexState = {
@@ -166,11 +170,40 @@ async function doScan(): Promise<void> {
   try {
     const entries = await walk(root);
     indexState.total = entries.length;
+    const adoptedIds = new Set<number>();
     await mapLimit(entries, config.indexConcurrency, async (entry) => {
       indexState.scanned++;
       try {
-        const existing = fileRowByPath(entry.relativePath);
         const mtime = Math.floor(entry.stat.mtimeMs);
+        const ext = path.extname(entry.name).toLowerCase().replace(/^\./, "");
+        const folder =
+          path.posix.dirname(entry.relativePath) === "."
+            ? ""
+            : path.posix.dirname(entry.relativePath);
+        let existing = fileRowByPath(entry.relativePath);
+        if (!existing) {
+          const moved = findMovedFileRow({
+            size: entry.stat.size,
+            mtimeMs: mtime,
+            newPath: entry.relativePath,
+            generation,
+          });
+          if (moved && !adoptedIds.has(moved.id)) {
+            const oldAbsolute = path.join(root, moved.path);
+            if (!fs.existsSync(oldAbsolute)) {
+              adoptedIds.add(moved.id);
+              adoptFilePath(moved.id, {
+                relativePath: entry.relativePath,
+                name: entry.name,
+                folder,
+                ext,
+                kind: mediaKind(ext),
+                description: moved.description,
+              });
+              existing = fileRowByPath(entry.relativePath);
+            }
+          }
+        }
         if (
           existing &&
           existing.size === entry.stat.size &&
@@ -179,57 +212,78 @@ async function doScan(): Promise<void> {
           touchFileScan(existing.id, generation);
           return;
         }
-        const meta = await readMetadata(entry.absolutePath, entry.relativePath);
-        if (existing) await cleanAssetCaches(existing.id);
-        if (meta.legacyPending || existing?.legacy_pending === 1)
-          legacyChanged = true;
-        // Formats that cannot carry metadata keep their tags in the index.
-        // Preserve those tags when the file is re-read or moved.
-        const indexedTags =
-          existing && existing.metadata_writable === 0
-            ? tagsForFile(existing.id)
-            : [];
-        const mergedTags = dedupeTags([...meta.tags, ...indexedTags]);
-        const ext = path.extname(entry.name).toLowerCase().replace(/^\./, "");
-        const folder =
-          path.posix.dirname(entry.relativePath) === "."
-            ? ""
-            : path.posix.dirname(entry.relativePath);
-        upsertFile({
-          relativePath: entry.relativePath,
-          name: entry.name,
-          folder,
-          ext,
-          kind: mediaKind(ext),
-          size: entry.stat.size,
-          mtimeMs: mtime,
-          captureAt: meta.captureAt,
-          localDate: meta.localDate,
-          gps: meta.gps,
-          camera: meta.camera,
-          width: meta.width,
-          height: meta.height,
-          duration: meta.duration,
-          description: meta.description,
-          tags: mergedTags,
-          metadataWritable: existing ? existing.metadata_writable === 1 : true,
-          legacyPending: meta.legacyPending,
-          scanGeneration: generation,
-        });
-        indexState.indexed++;
+        const processEntry = async () => {
+          const meta = await readMetadata(
+            entry.absolutePath,
+            entry.relativePath,
+          );
+          if (existing) await cleanAssetCaches(existing.id);
+          if (meta.legacyPending || existing?.legacy_pending === 1)
+            legacyChanged = true;
+          // Formats that cannot carry metadata keep their tags in the index.
+          // Preserve those tags when the file is re-read or moved.
+          const indexedTags =
+            existing && existing.metadata_writable === 0
+              ? tagsForFile(existing.id)
+              : [];
+          const mergedTags = dedupeTags([...meta.tags, ...indexedTags]);
+          const fileId = upsertFile({
+            relativePath: entry.relativePath,
+            name: entry.name,
+            folder,
+            ext,
+            kind: mediaKind(ext),
+            size: entry.stat.size,
+            mtimeMs: mtime,
+            captureAt: meta.captureAt,
+            localDate: meta.localDate,
+            gps: meta.gps,
+            camera: meta.camera,
+            width: meta.width,
+            height: meta.height,
+            duration: meta.duration,
+            description: meta.description,
+            tags: mergedTags,
+            metadataWritable: existing
+              ? existing.metadata_writable === 1
+              : true,
+            legacyPending: meta.legacyPending,
+            scanGeneration: generation,
+          });
+          reconcileFaceLabelsForFile(fileId);
+          indexState.indexed++;
+        };
+        if (existing) await withFileLock(existing.id, processEntry);
+        else await processEntry();
       } catch (error) {
         indexState.errors++;
         serverLog.warn("index failed", entry.relativePath, error);
       }
     });
-    if (walkErrors === 0 && indexState.errors === 0) {
-      const removedIds = deleteMissingFiles(generation);
-      for (const id of removedIds) await cleanAssetCaches(id);
+    if (
+      walkErrors === 0 &&
+      indexState.errors === 0 &&
+      (entries.length > 0 ||
+        (
+          db.prepare("SELECT COUNT(*) AS count FROM files").get() as {
+            count: number;
+          }
+        ).count === 0)
+    ) {
+      const removed = deleteMissingFiles(generation);
+      for (const id of removed.fileIds) await cleanAssetCaches(id);
+      await cleanFaceThumbs(removed.faceIds);
     } else {
       if (walkErrors > 0) indexState.errors += walkErrors;
-      serverLog.warn(
-        "skipped missing-file cleanup because some entries could not be read",
-      );
+      if (entries.length === 0) {
+        serverLog.warn(
+          "media root returned no files; skipping missing-file cleanup to protect the index",
+        );
+      } else {
+        serverLog.warn(
+          "skipped missing-file cleanup because some entries could not be read",
+        );
+      }
     }
     if (legacyChanged) setSetting("migrationNeedsScan", "true");
     if (facesAvailable()) {

@@ -14,6 +14,15 @@ const { db, facesForFile, replaceFacesForFile, tagsForFile, upsertFile } =
   await import("../server/db");
 const { renameTagValue } = await import("../server/tags");
 const { labelFace, syncFaceLabelForFile } = await import("../server/faces");
+const { getTask } = await import("../server/tasks");
+
+async function waitForIdle() {
+  for (let i = 0; i < 200; i++) {
+    if (!getTask()?.running) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("task did not finish");
+}
 
 test("a case-only tag rename preserves every file association", async () => {
   const fileId = upsertFile({
@@ -47,6 +56,7 @@ test("a case-only tag rename preserves every file association", async () => {
 
   assert.equal(result.started, true);
   assert.equal(result.updated, 1);
+  await waitForIdle();
   assert.deepEqual(
     tagsForFile(fileId).map((tag) => ({ ...tag })),
     [{ key: "people", value: "john r", source: "import" }],

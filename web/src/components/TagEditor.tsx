@@ -3,6 +3,7 @@ import { Plus, X, Sparkles, Check } from "lucide-react";
 import type { Tag, TagSuggestion } from "../api";
 import {
   groupTags,
+  isValidTag,
   normalizeKey,
   normalizeValue,
   valueNorm,
@@ -33,6 +34,7 @@ export function TagEditor({
 }: Props) {
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
+  const [error, setError] = useState<string | null>(null);
   const groups = useMemo(() => groupTags(tags), [tags]);
   const sourceByTag = useMemo(
     () =>
@@ -81,6 +83,12 @@ export function TagEditor({
       value: normalizeValue(tag.value),
     };
     if (!clean.key || !clean.value) return;
+    if (!isValidTag(clean)) {
+      setError(
+        "Keys must start with a letter and be at most 32 characters; values can be up to 200 characters.",
+      );
+      return;
+    }
     if (
       tags.some(
         (existing) =>
@@ -89,6 +97,7 @@ export function TagEditor({
       )
     )
       return;
+    setError(null);
     onChange([...tags, clean]);
   }
 
@@ -119,7 +128,7 @@ export function TagEditor({
           <div className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-teal-300">
             <Sparkles size={13} /> Suggested from your library
           </div>
-          <div className="grid gap-2">
+          <div className="grid grid-cols-1 gap-2">
             {suggestions.map((suggestion) => (
               <div
                 key={`${suggestion.key}:${suggestion.value}`}
@@ -134,11 +143,15 @@ export function TagEditor({
                     onSuggested?.(suggestion);
                   }}
                 >
-                  <span className="flex items-center gap-2 text-sm font-semibold">
-                    <Check size={15} className="text-teal-300" />
-                    <span className="text-teal-300">{suggestion.key}</span>
-                    <span className="truncate">{suggestion.value}</span>
-                    <span className="ml-auto rounded-full bg-teal-300/10 px-2 py-0.5 text-[10px] font-bold text-teal-200">
+                  <span className="flex min-w-0 items-center gap-2 text-sm font-semibold">
+                    <Check size={15} className="shrink-0 text-teal-300" />
+                    <span className="shrink-0 text-teal-300">
+                      {suggestion.key}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">
+                      {suggestion.value}
+                    </span>
+                    <span className="ml-auto shrink-0 rounded-full bg-teal-300/10 px-2 py-0.5 text-[10px] font-bold text-teal-200">
                       {Math.round(suggestion.score * 100)}%
                     </span>
                   </span>
@@ -176,7 +189,7 @@ export function TagEditor({
               group.values.map((value) => (
                 <span key={`${group.key}:${value}`} className="chip">
                   <span className="chip-key">{group.key}</span>
-                  <span>{value}</span>
+                  <span className="min-w-0 break-words">{value}</span>
                   {(() => {
                     const source =
                       sourceByTag.get(
@@ -220,6 +233,8 @@ export function TagEditor({
         <input
           className="input"
           list="tag-keys"
+          aria-label="Tag key"
+          maxLength={32}
           placeholder="key"
           value={key}
           onChange={(e) => setKey(e.target.value)}
@@ -234,6 +249,8 @@ export function TagEditor({
         <input
           className="input"
           list="tag-values"
+          aria-label="Tag value"
+          maxLength={200}
           placeholder={key ? `${key} value` : "value"}
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -253,6 +270,11 @@ export function TagEditor({
           <Plus size={18} />
         </button>
       </form>
+      {error && (
+        <p role="alert" className="text-xs text-rose-300">
+          {error}
+        </p>
+      )}
       <p className="text-[11px] text-slate-500">
         Keys are lowercase slugs. Values can contain spaces, commas, and
         apostrophes.

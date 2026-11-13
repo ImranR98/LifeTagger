@@ -169,6 +169,8 @@ function gpsFrom(
   if (String(tags.GPSLongitudeRef ?? "").toUpperCase() === "W" && lon > 0)
     lon = -lon;
   if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  // Cameras and phones commonly use 0,0 as a "no fix" placeholder.
+  if (lat === 0 && lon === 0) return null;
   return { lat, lon };
 }
 
@@ -183,8 +185,8 @@ function stringList(value: unknown): string[] {
 }
 
 function sameStringSet(expected: string[], actual: string[]): boolean {
-  const expectedSet = new Set(expected);
-  const actualSet = new Set(actual);
+  const expectedSet = new Set(expected.map((entry) => entry.normalize("NFC")));
+  const actualSet = new Set(actual.map((entry) => entry.normalize("NFC")));
   return (
     expectedSet.size === actualSet.size &&
     [...expectedSet].every((entry) => actualSet.has(entry))
@@ -211,6 +213,10 @@ export async function readMetadata(
       string,
       unknown
     >;
+    const partialErrors = (tags as { errors?: unknown }).errors;
+    if (Array.isArray(partialErrors) && partialErrors.length > 0) {
+      throw new Error(partialErrors.map(String).join("; "));
+    }
   } catch (error) {
     serverLog.warn("metadata read failed", relativePath, error);
     // Do not treat a failed read as an empty file. The indexer uses this
@@ -309,7 +315,10 @@ export async function writeMetadata(
       "IPTC:Keywords": entries,
       Description: input.description,
     } as unknown as Parameters<typeof exiftool.write>[1];
-    await exiftool.write(input.absolutePath, metadata, ["-overwrite_original"]);
+    await exiftool.write(input.absolutePath, metadata, [
+      "-overwrite_original",
+      "-P",
+    ]);
     const check = (await exiftool.read(
       input.absolutePath,
     )) as unknown as Record<string, unknown>;

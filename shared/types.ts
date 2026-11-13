@@ -31,6 +31,7 @@ export type FileSummary = {
   localDate: string | null;
   gps: { lat: number; lon: number } | null;
   tags: Tag[];
+  tagsRevision: number;
   legacyPending: boolean;
   thumbUrl: string;
   previewUrl: string;
@@ -70,6 +71,7 @@ export type BatchResponse = {
 };
 
 export type StatsResponse = {
+  today: string;
   streak: number;
   longestStreak: number;
   totalTagged: number;

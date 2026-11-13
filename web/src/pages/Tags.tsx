@@ -86,6 +86,7 @@ export default function TagsPage() {
           <span className="label">Add a key</span>
           <input
             className="input"
+            aria-label="New tag key"
             value={newKey}
             disabled={busy}
             onChange={(event) => setNewKey(event.target.value)}
@@ -111,7 +112,10 @@ export default function TagsPage() {
       </div>
 
       {error && (
-        <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">
+        <div
+          role="alert"
+          className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200"
+        >
           {error}
         </div>
       )}
@@ -208,6 +212,10 @@ function ValueRow({
       client.invalidateQueries({ queryKey: ["files"] });
       client.invalidateQueries({ queryKey: ["batch"] });
       client.invalidateQueries({ queryKey: ["status"] });
+      client.invalidateQueries({ queryKey: ["stats"] });
+      client.invalidateQueries({ queryKey: ["people"] });
+      client.invalidateQueries({ queryKey: ["clusters"] });
+      client.invalidateQueries({ queryKey: ["review"] });
     },
     onError: (mutationError) =>
       onError(
@@ -224,6 +232,10 @@ function ValueRow({
       client.invalidateQueries({ queryKey: ["files"] });
       client.invalidateQueries({ queryKey: ["batch"] });
       client.invalidateQueries({ queryKey: ["status"] });
+      client.invalidateQueries({ queryKey: ["stats"] });
+      client.invalidateQueries({ queryKey: ["people"] });
+      client.invalidateQueries({ queryKey: ["clusters"] });
+      client.invalidateQueries({ queryKey: ["review"] });
     },
     onError: (mutationError) =>
       onError(
@@ -243,6 +255,7 @@ function ValueRow({
       </div>
       <input
         className="input min-h-9 flex-1 py-1.5"
+        aria-label={`Rename ${tagKey} value ${value}`}
         value={next}
         disabled={disabled}
         onChange={(event) => setNext(event.target.value)}

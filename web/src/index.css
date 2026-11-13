@@ -195,6 +195,9 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  max-width: 100%;
+  min-width: 0;
+  flex-wrap: wrap;
   padding: 6px 10px;
   border-radius: 999px;
   border: 1px solid var(--line);
@@ -202,6 +205,7 @@ a {
   color: var(--text);
   font-size: 13px;
   font-weight: 550;
+  overflow-wrap: anywhere;
 }
 
 .chip-key {
@@ -235,6 +239,7 @@ a {
   align-items: flex-start;
   gap: 10px;
   width: 100%;
+  min-width: 0;
   text-align: left;
   padding: 10px 12px;
   border-radius: 14px;
@@ -250,6 +255,7 @@ a {
 .suggestion-reason {
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .nav {
@@ -265,6 +271,12 @@ a {
   border-top: 1px solid var(--line);
   background: rgba(11, 15, 20, 0.92);
   backdrop-filter: blur(16px);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.nav::-webkit-scrollbar {
+  display: none;
 }
 
 .nav-link {
@@ -272,12 +284,13 @@ a {
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  min-width: 52px;
-  padding: 6px 5px;
+  min-width: 48px;
+  padding: 6px 4px;
   border-radius: 12px;
   color: var(--muted);
   font-size: 10px;
   font-weight: 650;
+  white-space: nowrap;
 }
 
 .nav-link.active {
@@ -305,6 +318,7 @@ a {
     border-right: 1px solid var(--line);
     background: rgba(11, 15, 20, 0.72);
     backdrop-filter: blur(14px);
+    overflow-y: auto;
   }
 
   .with-sidebar {
@@ -365,15 +379,19 @@ a {
 
 .face-box span {
   position: absolute;
-  left: -2px;
-  top: -25px;
+  left: 2px;
+  top: 2px;
   padding: 2px 7px;
   border-radius: 6px;
   background: var(--accent);
   color: var(--accent-ink);
   font-size: 11px;
   font-weight: 750;
+  line-height: 1.25;
   white-space: nowrap;
+  max-width: calc(100% - 4px);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .progress-track {
@@ -428,11 +446,14 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  max-width: 100%;
+  min-width: 0;
   padding: 3px 8px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.05);
   color: var(--muted);
   font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .toast {

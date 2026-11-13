@@ -7,6 +7,7 @@ import {
   isValidTag,
   normalizeKey,
   normalizeValue,
+  tagsEqual,
   valueNorm,
 } from "../shared/tag-format";
 import {
@@ -24,6 +25,8 @@ import {
   tagKeyList,
   allTagValues,
   setTagKey,
+  setFaceLabel,
+  bumpTagsRevision,
 } from "./db";
 import { serverLog } from "./config";
 import { absolutePathFor } from "./media";
@@ -32,8 +35,10 @@ import {
   faceListForFile,
   invalidateKnownFaces,
   queueFaceProcessing,
+  reconcileFaceLabelsForFile,
   syncFaceLabelForFile,
 } from "./faces";
+import { withFileLock } from "./file-lock";
 import { indexState } from "./indexer";
 import {
   beginTask,
@@ -69,52 +74,69 @@ export async function saveFileTags(
   fileId: number,
   tags: Tag[],
   description: string,
+  expectedRevision?: number,
 ): Promise<SaveResult> {
   if (isWriteTaskRunning())
     throw new Error("Wait for the current task to finish before saving");
-  const row = fileRowById(fileId);
-  if (!row) throw new Error("file not found");
-  const absolute = absolutePathFor(row);
-  if (!absolute) throw new Error("file is outside the media root");
   const nextTags = dedupeTags(tags);
   for (const tag of nextTags) {
     if (!isValidTag(tag))
       throw new Error(`Invalid tag: ${tag.key}=${tag.value}`);
   }
-  const previousTags = tagsForFile(fileId);
-  const previousDescription = row.description ?? "";
-  const written = await writeMetadata({
-    relativePath: row.path,
-    absolutePath: absolute,
-    tags: nextTags,
-    description,
+  return withFileLock(fileId, async () => {
+    const row = fileRowById(fileId);
+    if (!row) throw new Error("file not found");
+    if (
+      expectedRevision !== undefined &&
+      row.tags_revision !== expectedRevision
+    ) {
+      throw new Error("This file changed elsewhere. Reload it and try again.");
+    }
+    const absolute = absolutePathFor(row);
+    if (!absolute) throw new Error("file is outside the media root");
+    const previousTags = tagsForFile(fileId);
+    const previousDescription = row.description ?? "";
+    const previousFaces = JSON.stringify(
+      faceListForFile(fileId).map((face) => ({
+        id: face.id,
+        label: face.label,
+      })),
+    );
+    const written = await writeMetadata({
+      relativePath: row.path,
+      absolutePath: absolute,
+      tags: nextTags,
+      description,
+    });
+    const stat = await fs.promises.stat(absolute);
+    updateFileAfterWrite(fileId, {
+      description,
+      tags: nextTags,
+      metadataWritable: written.metadataWritable,
+      mtimeMs: Math.floor(stat.mtimeMs),
+      size: stat.size,
+      captureAt: written.captureAt ?? row.capture_at,
+      localDate: written.localDate ?? row.local_date,
+      legacyPending: hasLegacyTags(row.name, description),
+    });
+    reconcileFaceLabelsForFile(fileId);
+    if (promoteAutoTagsForFile(fileId) > 0) invalidateKnownFaces();
+    syncFaceLabelForFile(fileId);
+    const undoId = recordUndo(
+      fileId,
+      previousTags,
+      previousDescription,
+      tagsForFile(fileId),
+      description,
+      previousFaces,
+    );
+    queueFaceProcessing(fileRowById(fileId) ?? row);
+    return {
+      detail: detailForFile(fileId)!,
+      undoId,
+      metadataWritable: written.metadataWritable,
+    };
   });
-  const stat = await fs.promises.stat(absolute);
-  updateFileAfterWrite(fileId, {
-    description,
-    tags: nextTags,
-    metadataWritable: written.metadataWritable,
-    mtimeMs: Math.floor(stat.mtimeMs),
-    size: stat.size,
-    captureAt: written.captureAt ?? row.capture_at,
-    localDate: written.localDate ?? row.local_date,
-    legacyPending: hasLegacyTags(row.name, description),
-  });
-  if (promoteAutoTagsForFile(fileId) > 0) invalidateKnownFaces();
-  const undoId = recordUndo(
-    fileId,
-    previousTags,
-    previousDescription,
-    nextTags,
-    description,
-  );
-  syncFaceLabelForFile(fileId);
-  queueFaceProcessing(fileRowById(fileId) ?? row);
-  return {
-    detail: detailForFile(fileId)!,
-    undoId,
-    metadataWritable: written.metadataWritable,
-  };
 }
 
 export async function undoChange(undoId: number): Promise<FileDetail | null> {
@@ -122,32 +144,67 @@ export async function undoChange(undoId: number): Promise<FileDetail | null> {
     throw new Error("Wait for the current task to finish before undoing");
   const entry = undoEntry(undoId);
   if (!entry || entry.undone === 1) return null;
-  const row = fileRowById(entry.file_id);
-  if (!row) return null;
-  const absolute = absolutePathFor(row);
-  if (!absolute) return null;
-  const tags = JSON.parse(entry.previous_tags) as Tag[];
-  const description = entry.previous_description ?? "";
-  const written = await writeMetadata({
-    relativePath: row.path,
-    absolutePath: absolute,
-    tags,
-    description,
+  return withFileLock(entry.file_id, async () => {
+    const row = fileRowById(entry.file_id);
+    if (!row) return null;
+    const absolute = absolutePathFor(row);
+    if (!absolute) return null;
+    const tags = JSON.parse(entry.previous_tags) as Tag[];
+    const expectedTags = JSON.parse(entry.new_tags) as Tag[];
+    const expectedDescription = entry.new_description ?? "";
+    if (
+      !tagsEqual(tagsForFile(entry.file_id), expectedTags) ||
+      (row.description ?? "") !== expectedDescription
+    ) {
+      throw new Error(
+        "This file changed after that save; the undo would overwrite newer edits.",
+      );
+    }
+    const previousFaces = entry.previous_faces
+      ? (JSON.parse(entry.previous_faces) as {
+          id: number;
+          label: string | null;
+        }[])
+      : [];
+    const description = entry.previous_description ?? "";
+    const written = await writeMetadata({
+      relativePath: row.path,
+      absolutePath: absolute,
+      tags,
+      description,
+    });
+    const stat = await fs.promises.stat(absolute);
+    updateFileAfterWrite(entry.file_id, {
+      description,
+      tags,
+      metadataWritable: written.metadataWritable,
+      mtimeMs: Math.floor(stat.mtimeMs),
+      size: stat.size,
+      captureAt: written.captureAt ?? row.capture_at,
+      localDate: written.localDate ?? row.local_date,
+      legacyPending: hasLegacyTags(row.name, description),
+    });
+    reconcileFaceLabelsForFile(entry.file_id);
+    syncFaceLabelForFile(entry.file_id);
+    for (const face of previousFaces) {
+      if (!face.label) continue;
+      if (
+        !tags.some(
+          (tag) =>
+            tag.key === "people" &&
+            valueNorm(tag.value) === valueNorm(face.label!),
+        )
+      )
+        continue;
+      setFaceLabel(face.id, face.label, {
+        source: "tag-sync",
+        confidence: 1,
+      });
+    }
+    invalidateKnownFaces();
+    markUndone(undoId);
+    return detailForFile(entry.file_id);
   });
-  const stat = await fs.promises.stat(absolute);
-  updateFileAfterWrite(entry.file_id, {
-    description,
-    tags,
-    metadataWritable: written.metadataWritable,
-    mtimeMs: Math.floor(stat.mtimeMs),
-    size: stat.size,
-    captureAt: written.captureAt ?? row.capture_at,
-    localDate: written.localDate ?? row.local_date,
-    legacyPending: hasLegacyTags(row.name, description),
-  });
-  syncFaceLabelForFile(entry.file_id);
-  markUndone(undoId);
-  return detailForFile(entry.file_id);
 }
 
 export type TagJobResult = {
@@ -171,27 +228,29 @@ async function persistTagsForFiles(
   for (let index = 0; index < fileIds.length; index++) {
     const fileId = fileIds[index]!;
     try {
-      const file = fileRowById(fileId);
-      if (!file) continue;
-      const absolute = absolutePathFor(file);
-      if (!absolute) continue;
-      const tags = tagsForFile(fileId);
-      const written = await writeMetadata({
-        relativePath: file.path,
-        absolutePath: absolute,
-        tags,
-        description: file.description ?? "",
-      });
-      const stat = await fs.promises.stat(absolute);
-      updateFileAfterWrite(fileId, {
-        description: file.description ?? "",
-        tags,
-        metadataWritable: written.metadataWritable,
-        mtimeMs: Math.floor(stat.mtimeMs),
-        size: stat.size,
-        captureAt: written.captureAt ?? file.capture_at,
-        localDate: written.localDate ?? file.local_date,
-        legacyPending: hasLegacyTags(file.name, file.description ?? ""),
+      await withFileLock(fileId, async () => {
+        const file = fileRowById(fileId);
+        if (!file) return;
+        const absolute = absolutePathFor(file);
+        if (!absolute) return;
+        const tags = tagsForFile(fileId);
+        const written = await writeMetadata({
+          relativePath: file.path,
+          absolutePath: absolute,
+          tags,
+          description: file.description ?? "",
+        });
+        const stat = await fs.promises.stat(absolute);
+        updateFileAfterWrite(fileId, {
+          description: file.description ?? "",
+          tags,
+          metadataWritable: written.metadataWritable,
+          mtimeMs: Math.floor(stat.mtimeMs),
+          size: stat.size,
+          captureAt: written.captureAt ?? file.capture_at,
+          localDate: written.localDate ?? file.local_date,
+          legacyPending: hasLegacyTags(file.name, file.description ?? ""),
+        });
       });
     } catch (error) {
       errors++;
@@ -232,26 +291,20 @@ export async function renameTagValue(
       reason: "Wait for the current task to finish",
     };
   try {
+    const oldNorm = valueNorm(oldValue);
     const existingNew = db
       .prepare("SELECT id FROM tags WHERE key = ? AND value_norm = ?")
       .get(cleanKey, valueNorm(cleanNew)) as { id: number } | undefined;
-    if (existingNew?.id === old.id) {
-      // Case/spacing-only rename: the normalized value still points at the same
-      // row. Keep all associations and only update the display value.
-      db.exec("BEGIN IMMEDIATE");
-      try {
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      if (existingNew?.id === old.id) {
+        // Case/spacing-only rename: the normalized value still points at the
+        // same row. Keep all associations and only update the display value.
         db.prepare(
           "UPDATE tags SET value = ?, value_norm = ? WHERE id = ?",
         ).run(cleanNew, valueNorm(cleanNew), old.id);
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
-    } else {
-      let newId = existingNew?.id;
-      db.exec("BEGIN IMMEDIATE");
-      try {
+      } else {
+        let newId = existingNew?.id;
         if (newId) {
           for (const row of fileRows) {
             db.prepare(
@@ -269,13 +322,26 @@ export async function renameTagValue(
           ).run(cleanNew, valueNorm(cleanNew), old.id);
           newId = old.id;
         }
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
       }
+      db.prepare(
+        "DELETE FROM automation_suggestions WHERE key = ? AND value_norm = ?",
+      ).run(cleanKey, oldNorm);
+      db.prepare(
+        "DELETE FROM suggestion_feedback WHERE key = ? AND value_norm = ?",
+      ).run(cleanKey, oldNorm);
+      db.prepare("DELETE FROM migration_map WHERE key = ? AND value = ?").run(
+        cleanKey,
+        normalizeValue(oldValue),
+      );
+      for (const row of fileRows) {
+        updateFts(row.file_id);
+        bumpTagsRevision(row.file_id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
     }
-    for (const row of fileRows) updateFts(row.file_id);
   } catch (error) {
     finishTask(
       1,
@@ -292,6 +358,7 @@ export async function renameTagValue(
       `Renamed ${cleanKey}`,
     );
   }
+  invalidateKnownFaces();
   return { started: true, updated: fileRows.length };
 }
 
@@ -337,8 +404,29 @@ export async function removeTagEverywhere(
     };
   }
   try {
-    db.prepare("DELETE FROM tags WHERE id = ?").run(row.id);
-    for (const file of files) updateFts(file.file_id);
+    const oldNorm = valueNorm(value);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare("DELETE FROM tags WHERE id = ?").run(row.id);
+      db.prepare(
+        "DELETE FROM automation_suggestions WHERE key = ? AND value_norm = ?",
+      ).run(cleanKey, oldNorm);
+      db.prepare(
+        "DELETE FROM suggestion_feedback WHERE key = ? AND value_norm = ?",
+      ).run(cleanKey, oldNorm);
+      db.prepare("DELETE FROM migration_map WHERE key = ? AND value = ?").run(
+        cleanKey,
+        normalizeValue(value),
+      );
+      for (const file of files) {
+        updateFts(file.file_id);
+        bumpTagsRevision(file.file_id);
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
   } catch (error) {
     finishTask(
       1,
@@ -354,6 +442,7 @@ export async function removeTagEverywhere(
       `Removed ${cleanKey}`,
     );
   }
+  invalidateKnownFaces();
   return { started: true, updated: files.length };
 }
 

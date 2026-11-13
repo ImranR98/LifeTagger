@@ -210,3 +210,13 @@ export async function cleanAssetCaches(fileId: number): Promise<void> {
     ),
   );
 }
+
+export async function cleanFaceThumbs(faceIds: number[]): Promise<void> {
+  await Promise.all(
+    faceIds.map((faceId) =>
+      fs.promises
+        .unlink(path.join(config.faceThumbsDir, `${faceId}.jpg`))
+        .catch(() => undefined),
+    ),
+  );
+}

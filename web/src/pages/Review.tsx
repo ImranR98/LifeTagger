@@ -43,6 +43,14 @@ export default function ReviewPage() {
   const rows =
     suggestions.data?.pages.flatMap((page) => page.suggestions) ?? [];
   const visibleIds = useMemo(() => rows.map((row) => row.id), [rows]);
+  const visibleKey = visibleIds.join(",");
+  useEffect(() => {
+    const visible = new Set(visibleIds);
+    setSelected((current) => {
+      const next = new Set([...current].filter((id) => visible.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [visibleKey]);
   const task = status.data?.task;
   const busy = Boolean(task?.running) || Boolean(status.data?.indexing.running);
   const wasRunning = useRef(false);
@@ -52,7 +60,10 @@ export default function ReviewPage() {
       client.invalidateQueries({ queryKey: ["review"] });
       client.invalidateQueries({ queryKey: ["tags"] });
       client.invalidateQueries({ queryKey: ["people"] });
+      client.invalidateQueries({ queryKey: ["clusters"] });
       client.invalidateQueries({ queryKey: ["files"] });
+      client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["stats"] });
     }
     wasRunning.current = Boolean(task?.running);
   }, [task?.running, client]);
@@ -62,7 +73,10 @@ export default function ReviewPage() {
     client.invalidateQueries({ queryKey: ["status"] });
     client.invalidateQueries({ queryKey: ["tags"] });
     client.invalidateQueries({ queryKey: ["people"] });
+    client.invalidateQueries({ queryKey: ["clusters"] });
     client.invalidateQueries({ queryKey: ["files"] });
+    client.invalidateQueries({ queryKey: ["batch"] });
+    client.invalidateQueries({ queryKey: ["stats"] });
   }
 
   const runPlace = useMutation({
@@ -238,14 +252,30 @@ export default function ReviewPage() {
             ) && (
               <button
                 className="btn px-3 py-1 text-xs"
-                onClick={() => api.cancelTask().catch(() => undefined)}
+                onClick={() =>
+                  api
+                    .cancelTask()
+                    .catch((cancelError) =>
+                      setError(
+                        cancelError instanceof Error
+                          ? cancelError.message
+                          : "Could not cancel the task",
+                      ),
+                    )
+                }
               >
                 Cancel
               </button>
             )}
           </div>
           {task.total > 0 && (
-            <div className="progress-track mt-2 h-1">
+            <div
+              className="progress-track mt-2 h-1"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={task.total}
+              aria-valuenow={task.processed}
+            >
               <div
                 className="progress-fill"
                 style={{
@@ -258,12 +288,18 @@ export default function ReviewPage() {
       )}
 
       {message && (
-        <div className="rounded-xl border border-teal-300/25 bg-teal-300/10 p-3 text-sm text-teal-100">
+        <div
+          role="status"
+          className="rounded-xl border border-teal-300/25 bg-teal-300/10 p-3 text-sm text-teal-100"
+        >
           {message}
         </div>
       )}
       {error && (
-        <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">
+        <div
+          role="alert"
+          className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200"
+        >
           {error}
         </div>
       )}
@@ -280,6 +316,7 @@ export default function ReviewPage() {
             <button
               key={value}
               type="button"
+              aria-pressed={kind === value}
               className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${
                 kind === value
                   ? "bg-teal-300 text-slate-950"
@@ -348,6 +385,7 @@ export default function ReviewPage() {
               <button
                 key={suggestion.id}
                 type="button"
+                aria-pressed={isSelected}
                 className={`thumb-card relative overflow-hidden text-left transition-all ${
                   isSelected
                     ? "ring-2 ring-teal-300 ring-offset-2 ring-offset-[#0b0f14]"

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import type { Face, FileDetail, FileSummary } from "@shared/types";
 
@@ -14,6 +14,9 @@ export function MediaViewer({
   showFaces?: boolean;
 }) {
   const [playing, setPlaying] = useState(false);
+  useEffect(() => {
+    setPlaying(false);
+  }, [file.id]);
   return (
     <div className="media-frame">
       <div className="media-content">

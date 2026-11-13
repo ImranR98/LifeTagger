@@ -12,6 +12,7 @@ import {
   countNeedsReviewFiles,
   db,
   faceCount,
+  fileListCursor,
   fileRowById,
   getAllSettings,
   getMediaRoot,
@@ -57,6 +58,7 @@ import {
   type MappingInput,
 } from "./migration";
 import { getTask, isTaskRunning, requestTaskCancel } from "./tasks";
+import { withFileLock } from "./file-lock";
 import {
   automationRunCounts,
   confirmAutoTag,
@@ -107,6 +109,20 @@ function today(): string {
     day: "2-digit",
   }).format(new Date());
 }
+
+function isValidDateKey(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return (
+    Number.isFinite(parsed.getTime()) &&
+    parsed.toISOString().slice(0, 10) === value
+  );
+}
+
+const dateKeySchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/)
+  .refine(isValidDateKey, "Invalid date");
 
 router.get("/health", (_req, res) => {
   res.json({ ok: true, version: config.appVersion });
@@ -324,15 +340,17 @@ router.post("/index/rescan", (_req, res) => {
 
 router.get("/batch/today", (req, res) => {
   const date = typeof req.query.date === "string" ? req.query.date : undefined;
+  if (date && !isValidDateKey(date)) return fail(res, 400, "Invalid date");
   res.json(getOrCreateBatch(date));
 });
 
 router.post("/batch/today/more", (req, res) => {
   const date = typeof req.query.date === "string" ? req.query.date : undefined;
+  if (date && !isValidDateKey(date)) return fail(res, 400, "Invalid date");
   res.json(extendBatch(date));
 });
 
-const skipSchema = z.object({ date: z.string().optional() });
+const skipSchema = z.object({ date: dateKeySchema.optional() });
 router.post("/files/:id/skip", (req, res) => {
   const id = numberParam(req.params.id);
   if (!id) return fail(res, 400, "Invalid file id");
@@ -348,7 +366,11 @@ router.get("/files", (req, res) => {
     Math.max(1, Number.parseInt(String(req.query.limit ?? ""), 10) || 40),
   );
   const cursor =
-    Number.parseInt(String(req.query.cursor ?? ""), 10) || undefined;
+    typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+  const sort =
+    req.query.sort === "oldest" || req.query.sort === "name"
+      ? req.query.sort
+      : "newest";
   const rows = listFileRows({
     q: typeof req.query.q === "string" ? req.query.q : undefined,
     tagged: req.query.tagged === "1" || req.query.tagged === "true",
@@ -359,15 +381,13 @@ router.get("/files", (req, res) => {
     value: typeof req.query.value === "string" ? req.query.value : undefined,
     cursor,
     limit: limit + 1,
-    sort:
-      req.query.sort === "oldest" || req.query.sort === "name"
-        ? req.query.sort
-        : "newest",
+    sort,
   });
   const page = rows.slice(0, limit);
+  const last = page.at(-1);
   res.json({
     files: page.map((row) => summaryFromRow(row)),
-    cursor: page.at(-1)?.id ?? null,
+    cursor: last ? fileListCursor(last, sort) : null,
     hasMore: rows.length > limit,
   });
 });
@@ -383,7 +403,8 @@ router.get("/files/:id", (req, res) => {
 const saveSchema = z.object({
   tags: z.array(z.object({ key: z.string(), value: z.string() })).max(200),
   description: z.string().max(20_000).default(""),
-  date: z.string().optional(),
+  date: dateKeySchema.optional(),
+  tagsRevision: z.number().int().nonnegative().optional(),
 });
 
 router.patch("/files/:id", async (req, res) => {
@@ -394,7 +415,22 @@ router.patch("/files/:id", async (req, res) => {
   const input = parsed.data;
   if (!input.tags.every((tag: Tag) => isValidTag(tag)))
     return fail(res, 400, "Invalid tag");
-  const result = await saveFileTags(id, input.tags, input.description);
+  const result = await saveFileTags(
+    id,
+    input.tags,
+    input.description,
+    input.tagsRevision,
+  ).catch((error: unknown) => {
+    if (error instanceof Error && error.message.includes("changed elsewhere"))
+      return null;
+    throw error;
+  });
+  if (!result)
+    return fail(
+      res,
+      409,
+      "This file changed elsewhere. Reload it and try again.",
+    );
   markBatchItem(input.date ?? today(), id, "done");
   res.json({
     ...result.detail,
@@ -406,9 +442,25 @@ router.patch("/files/:id", async (req, res) => {
 router.post("/undo/:id", async (req, res) => {
   const id = numberParam(req.params.id);
   if (!id) return fail(res, 400, "Invalid undo id");
-  const detail = await undoChange(id);
+  const detail = await undoChange(id).catch((error: unknown) => {
+    if (
+      error instanceof Error &&
+      error.message.includes("would overwrite newer edits")
+    )
+      return { conflict: true as const };
+    throw error;
+  });
+  if (detail && "conflict" in detail)
+    return fail(
+      res,
+      409,
+      "This file changed after that save; undo would overwrite newer edits.",
+    );
   if (!detail) return fail(res, 404, "Undo entry not found or already used");
-  const date = typeof req.body?.date === "string" ? req.body.date : today();
+  const date =
+    typeof req.body?.date === "string" && isValidDateKey(req.body.date)
+      ? req.body.date
+      : today();
   markBatchItem(date, detail.id, "pending");
   res.json(detail);
 });
@@ -417,7 +469,7 @@ const rejectSuggestionSchema = z.object({
   fileId: z.number().int().positive(),
   key: z.string().min(1),
   value: z.string().min(1),
-  date: z.string().optional(),
+  date: dateKeySchema.optional(),
 });
 router.post("/suggestions/reject", (req, res) => {
   const parsed = rejectSuggestionSchema.safeParse(req.body);
@@ -521,14 +573,16 @@ router.post("/tags/remove", async (req, res) => {
 });
 
 const confirmTagSchema = z.object({ key: z.string(), value: z.string() });
-router.post("/files/:id/tags/confirm", (req, res) => {
+router.post("/files/:id/tags/confirm", async (req, res) => {
   const id = numberParam(req.params.id);
   if (!id) return fail(res, 400, "Invalid file id");
   const parsed = confirmTagSchema.safeParse(req.body);
   if (!parsed.success) return fail(res, 400, "Invalid request");
-  if (!confirmAutoTag(id, parsed.data.key, parsed.data.value))
-    return fail(res, 404, "Auto-generated tag not found");
-  res.json({ ok: true });
+  const promoted = await withFileLock(id, async () =>
+    confirmAutoTag(id, parsed.data.key, parsed.data.value),
+  );
+  if (!promoted) return fail(res, 404, "Auto-generated tag not found");
+  res.json({ ok: true, tagsRevision: fileRowById(id)?.tags_revision ?? null });
 });
 
 router.post("/automation/places/run", (_req, res) => {
@@ -720,7 +774,9 @@ router.post("/files/:id/faces/process", async (req, res) => {
   res.json({ faces: faceListForFile(id), available: facesAvailable() });
 });
 
-const faceLabelSchema = z.object({ person: z.string().min(1).max(100) });
+const faceLabelSchema = z.object({
+  person: z.string().trim().min(1).max(100),
+});
 router.post("/faces/:id/label", async (req, res) => {
   const id = numberParam(req.params.id);
   if (!id) return fail(res, 400, "Invalid face id");
@@ -740,8 +796,8 @@ router.post("/faces/:id/unlabel", async (req, res) => {
 });
 
 const clusterLabelSchema = z.object({
-  faceIds: z.array(z.number().int().positive()).min(1),
-  person: z.string().min(1).max(100),
+  faceIds: z.array(z.number().int().positive()).min(1).max(2000),
+  person: z.string().trim().min(1).max(100),
 });
 router.post("/faces/clusters/label", async (req, res) => {
   const parsed = clusterLabelSchema.safeParse(req.body);

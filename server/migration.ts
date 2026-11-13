@@ -25,6 +25,7 @@ import { absolutePathFor } from "./media";
 import { writeMetadata } from "./metadata";
 import { indexState } from "./indexer";
 import { beginTask, finishTask, getTask, updateTask } from "./tasks";
+import { withFileLock } from "./file-lock";
 
 const SCAN_CHUNK = 500;
 
@@ -204,6 +205,9 @@ async function runMigrationScan(): Promise<void> {
     migrationState.mode = null;
     migrationState.finishedAt = new Date().toISOString();
     refreshMigrationCounters();
+    if (getTask()?.running) {
+      finishTask(migrationState.errors, "Migration scan stopped");
+    }
   }
 }
 
@@ -399,7 +403,13 @@ async function runMigrationApply(options: {
   if (!beginTask("migration-apply", 0, "Applying migration"))
     throw new Error("Another task is already running");
 
-  const rows = fileRowsWithLegacy();
+  let rows: ReturnType<typeof fileRowsWithLegacy>;
+  try {
+    rows = fileRowsWithLegacy();
+  } catch (error) {
+    finishTask(1, "Migration failed");
+    throw error;
+  }
   migrationState.running = true;
   migrationState.mode = "apply";
   migrationState.startedAt = new Date().toISOString();
@@ -415,86 +425,92 @@ async function runMigrationApply(options: {
   try {
     for (const row of rows) {
       try {
-        const filename = parseLegacyFilename(row.name);
-        const descriptionParts = splitLegacyDescription(row.description ?? "", {
-          allowSingle: Boolean(filename),
-          filenameTags: filename?.tags,
-        });
-        const legacy = Array.from(
-          new Set([...(filename?.tags ?? []), ...descriptionParts.tags]),
-        );
-        const mapped = mappedTags(legacy);
-        if (!mapped.complete) {
-          throw new Error(`unmapped legacy tag on ${row.path}`);
-        }
-        const absolute = absolutePathFor(row);
-        if (!absolute) throw new Error("invalid path");
-        const existingTags = tagsForFile(row.id);
-        const nextTags = dedupeTags([...existingTags, ...mapped.tags]);
-        const nextDescription =
-          descriptionParts.tags.length > 0
-            ? descriptionParts.description
-            : (row.description ?? "");
-        const written = await writeMetadata({
-          relativePath: row.path,
-          absolutePath: absolute,
-          tags: nextTags,
-          description: nextDescription,
-        });
-        if (!written.metadataWritable) throw new Error("metadata write failed");
+        await withFileLock(row.id, async () => {
+          const filename = parseLegacyFilename(row.name);
+          const descriptionParts = splitLegacyDescription(
+            row.description ?? "",
+            {
+              allowSingle: Boolean(filename),
+              filenameTags: filename?.tags,
+            },
+          );
+          const legacy = Array.from(
+            new Set([...(filename?.tags ?? []), ...descriptionParts.tags]),
+          );
+          const mapped = mappedTags(legacy);
+          if (!mapped.complete) {
+            throw new Error(`unmapped legacy tag on ${row.path}`);
+          }
+          const absolute = absolutePathFor(row);
+          if (!absolute) throw new Error("invalid path");
+          const existingTags = tagsForFile(row.id);
+          const nextTags = dedupeTags([...existingTags, ...mapped.tags]);
+          const nextDescription =
+            descriptionParts.tags.length > 0
+              ? descriptionParts.description
+              : (row.description ?? "");
+          const written = await writeMetadata({
+            relativePath: row.path,
+            absolutePath: absolute,
+            tags: nextTags,
+            description: nextDescription,
+          });
+          if (!written.metadataWritable)
+            throw new Error("metadata write failed");
 
-        let newRelative = row.path;
-        let newName = row.name;
-        if (options.stripFilenames && filename) {
-          const targetRelative = path.posix.join(
-            path.posix.dirname(row.path) === "."
-              ? ""
-              : path.posix.dirname(row.path),
-            filename.newName,
-          );
-          const targetAbsolute = path.resolve(root, targetRelative);
-          if (targetAbsolute !== absolute && fs.existsSync(targetAbsolute)) {
-            throw new Error(
-              `cannot strip filename, target exists: ${targetRelative}`,
+          let newRelative = row.path;
+          let newName = row.name;
+          if (options.stripFilenames && filename) {
+            const targetRelative = path.posix.join(
+              path.posix.dirname(row.path) === "."
+                ? ""
+                : path.posix.dirname(row.path),
+              filename.newName,
             );
+            const targetAbsolute = path.resolve(root, targetRelative);
+            if (targetAbsolute !== absolute && fs.existsSync(targetAbsolute)) {
+              throw new Error(
+                `cannot strip filename, target exists: ${targetRelative}`,
+              );
+            }
+            if (targetAbsolute !== absolute) {
+              await fs.promises.rename(absolute, targetAbsolute);
+              await fs.promises
+                .appendFile(
+                  path.join(config.migrationDir, "renames.jsonl"),
+                  JSON.stringify({
+                    fileId: row.id,
+                    from: row.path,
+                    to: targetRelative,
+                    at: new Date().toISOString(),
+                  }) + "\n",
+                )
+                .catch(() => undefined);
+              newRelative = targetRelative;
+              newName = filename.newName;
+            }
           }
-          if (targetAbsolute !== absolute) {
-            await fs.promises.rename(absolute, targetAbsolute);
-            await fs.promises
-              .appendFile(
-                path.join(config.migrationDir, "renames.jsonl"),
-                JSON.stringify({
-                  fileId: row.id,
-                  from: row.path,
-                  to: targetRelative,
-                  at: new Date().toISOString(),
-                }) + "\n",
-              )
-              .catch(() => undefined);
-            newRelative = targetRelative;
-            newName = filename.newName;
-          }
-        }
-        const stat = await fs.promises.stat(path.resolve(root, newRelative));
-        updateFileAfterWrite(row.id, {
-          description: nextDescription,
-          tags: nextTags,
-          metadataWritable: true,
-          mtimeMs: Math.floor(stat.mtimeMs),
-          size: stat.size,
-          captureAt: written.captureAt ?? row.capture_at,
-          localDate: written.localDate ?? row.local_date,
-          legacyPending: false,
+          const stat = await fs.promises.stat(path.resolve(root, newRelative));
+          updateFileAfterWrite(row.id, {
+            description: nextDescription,
+            tags: nextTags,
+            metadataWritable: true,
+            mtimeMs: Math.floor(stat.mtimeMs),
+            size: stat.size,
+            captureAt: written.captureAt ?? row.capture_at,
+            localDate: written.localDate ?? row.local_date,
+            legacyPending: false,
+          });
+          if (newRelative !== row.path)
+            updateFilePath(
+              row.id,
+              newRelative,
+              newName,
+              stat.size,
+              Math.floor(stat.mtimeMs),
+            );
+          migrationState.appliedFiles++;
         });
-        if (newRelative !== row.path)
-          updateFilePath(
-            row.id,
-            newRelative,
-            newName,
-            stat.size,
-            Math.floor(stat.mtimeMs),
-          );
-        migrationState.appliedFiles++;
       } catch (error) {
         migrationState.errors++;
         migrationState.lastError = scanError(error);
@@ -535,6 +551,9 @@ async function runMigrationApply(options: {
     migrationState.mode = null;
     migrationState.finishedAt = new Date().toISOString();
     refreshMigrationCounters();
+    if (getTask()?.running) {
+      finishTask(migrationState.errors, "Migration stopped");
+    }
     serverLog.info(
       "migration complete",
       migrationState.appliedFiles,

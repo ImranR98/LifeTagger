@@ -107,6 +107,8 @@ export default function SettingsPage() {
       setError(null);
       setNotice(`${result.deleted} rejected suggestion(s) reset.`);
       client.invalidateQueries({ queryKey: ["review"] });
+      client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["status"] });
     },
     onError: (mutationError) =>
       setError(
@@ -302,12 +304,18 @@ export default function SettingsPage() {
           )}
         </div>
         {error && (
-          <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">
+          <div
+            role="alert"
+            className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200"
+          >
             {error}
           </div>
         )}
         {notice && (
-          <div className="rounded-xl border border-teal-300/25 bg-teal-300/10 p-3 text-sm text-teal-100">
+          <div
+            role="status"
+            className="rounded-xl border border-teal-300/25 bg-teal-300/10 p-3 text-sm text-teal-100"
+          >
             {notice}
           </div>
         )}
@@ -570,6 +578,7 @@ function PushSettings({ pushConfigured }: { pushConfigured: boolean }) {
 
   async function unsubscribe() {
     setBusy(true);
+    setMessage(null);
     try {
       const registration = await navigator.serviceWorker.ready;
       const subscription = await registration.pushManager.getSubscription();
@@ -579,6 +588,12 @@ function PushSettings({ pushConfigured }: { pushConfigured: boolean }) {
       }
       setSubscribed(false);
       setMessage("Notifications disabled.");
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Could not disable notifications.",
+      );
     } finally {
       setBusy(false);
     }

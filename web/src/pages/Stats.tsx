@@ -2,12 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { Flame, Image, Sparkles, Tag, UserCheck } from "lucide-react";
 import { api } from "../api";
 
-function dayKey(date: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
+function shiftDay(date: string, offset: number): string {
+  const parsed = new Date(`${date}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + offset);
+  return parsed.toISOString().slice(0, 10);
 }
 
 export default function StatsPage() {
@@ -17,12 +15,11 @@ export default function StatsPage() {
   const data = stats.data;
   const activity = new Map(data.last30Days.map((day) => [day.date, day.done]));
   const days = Array.from({ length: 28 }, (_, index) => {
-    const date = new Date();
-    date.setDate(date.getDate() - (27 - index));
-    return { date: dayKey(date), done: activity.get(dayKey(date)) ?? 0 };
+    const date = shiftDay(data.today, index - 27);
+    return { date, done: activity.get(date) ?? 0 };
   });
   const max = Math.max(1, ...days.map((day) => day.done));
-  const total30 = data.last30Days.reduce((sum, day) => sum + day.done, 0);
+  const total28 = days.reduce((sum, day) => sum + day.done, 0);
 
   return (
     <div className="space-y-5">
@@ -69,7 +66,7 @@ export default function StatsPage() {
           <div>
             <h2 className="text-sm font-semibold">Last 28 days</h2>
             <p className="text-xs text-slate-500">
-              {total30} photos handled · longest streak {data.longestStreak}
+              {total28} photos handled · longest streak {data.longestStreak}
             </p>
           </div>
         </div>
@@ -78,6 +75,7 @@ export default function StatsPage() {
             <div
               key={day.date}
               title={`${day.date}: ${day.done} tagged`}
+              aria-label={`${day.date}: ${day.done} tagged`}
               className="aspect-square rounded-md border border-slate-800"
               style={{
                 background:

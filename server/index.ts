@@ -80,12 +80,7 @@ app.use(
     if (res.headersSent) return;
     const status = error instanceof SyntaxError ? 400 : 500;
     res.status(status).json({
-      error:
-        error instanceof SyntaxError
-          ? "Malformed JSON body"
-          : error instanceof Error
-            ? error.message
-            : "Internal server error",
+      error: status === 500 ? "Internal server error" : "Malformed JSON body",
     });
   },
 );
@@ -94,6 +89,14 @@ const server = app.listen(config.port, config.host, () => {
   serverLog.info(
     `LifeTagger listening on http://${config.host}:${config.port}`,
   );
+  if (
+    config.allowedMediaRoots.length === 0 &&
+    !["127.0.0.1", "::1", "localhost"].includes(config.host)
+  ) {
+    serverLog.warn(
+      "ALLOWED_MEDIA_ROOTS is empty while listening on a non-loopback address. Anyone who can reach the app can select any readable server directory as the media root. Put LifeTagger behind authentication or set ALLOWED_MEDIA_ROOTS.",
+    );
+  }
   startIndexer();
   startPushScheduler();
   startDbSnapshots();

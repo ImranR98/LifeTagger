@@ -18,7 +18,7 @@ export default function LibraryPage() {
         cursor: pageParam,
         limit: 60,
       }),
-    initialPageParam: undefined as number | undefined,
+    initialPageParam: undefined as string | undefined,
     getNextPageParam: (last) =>
       last.hasMore ? (last.cursor ?? undefined) : undefined,
   });
@@ -42,6 +42,7 @@ export default function LibraryPage() {
           />
           <input
             className="input pl-10"
+            aria-label="Search the library"
             placeholder="Search names, descriptions, tags…"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
@@ -63,6 +64,7 @@ export default function LibraryPage() {
               <button
                 key={value}
                 type="button"
+                aria-pressed={mode === value}
                 className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
                   mode === value
                     ? "bg-teal-300 text-slate-950"
@@ -86,7 +88,7 @@ export default function LibraryPage() {
       )}
 
       {files.isError && (
-        <div className="card p-6">
+        <div role="alert" className="card p-6">
           <p className="font-semibold">The library could not be loaded.</p>
           <p className="mt-1 text-sm text-slate-400">
             {files.error instanceof Error

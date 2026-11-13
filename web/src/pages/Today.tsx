@@ -10,6 +10,7 @@ import {
   Undo2,
 } from "lucide-react";
 import type { Tag } from "@shared/types";
+import { valueNorm } from "@shared/tag-format";
 import { api } from "../api";
 import { MediaViewer } from "../components/MediaViewer";
 import { TagEditor } from "../components/TagEditor";
@@ -32,6 +33,7 @@ export default function TodayPage() {
   });
   const [tags, setTags] = useState<Tag[]>([]);
   const [description, setDescription] = useState("");
+  const [revision, setRevision] = useState<number | undefined>(undefined);
   const [rejected, setRejected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [undoId, setUndoId] = useState<number | null>(null);
@@ -57,17 +59,28 @@ export default function TodayPage() {
     setError(null);
   }, [item?.id, item?.tags.length, item?.description]);
 
+  useEffect(() => {
+    setRevision(item?.tagsRevision);
+  }, [item?.id, item?.tagsRevision]);
+
   const save = useMutation({
-    mutationFn: () => api.save(item!.id, tags, description, batch.data?.date),
+    mutationFn: () =>
+      api.save(item!.id, tags, description, batch.data?.date, revision),
     onSuccess: (result) => {
       setError(null);
       setUndoId(result.undoId);
+      setRevision(result.tagsRevision);
+      if (item?.id === result.id) {
+        setTags(result.tags);
+        setDescription(result.description);
+      }
       setNotice(
         result.metadataWritable
           ? null
           : "Saved in LifeTagger only — this file type did not accept metadata.",
       );
       client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["tags"] });
       client.invalidateQueries({ queryKey: ["stats"] });
       client.invalidateQueries({ queryKey: ["files"] });
       client.invalidateQueries({ queryKey: ["status"] });
@@ -92,11 +105,17 @@ export default function TodayPage() {
 
   const undo = useMutation({
     mutationFn: () => api.undo(undoId!, batch.data?.date),
-    onSuccess: () => {
+    onSuccess: (result) => {
       setError(null);
       setUndoId(null);
       setNotice("Change undone.");
+      if (item?.id === result.id) {
+        setTags(result.tags);
+        setDescription(result.description);
+      }
+      setRevision(result.tagsRevision);
       client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["tags"] });
       client.invalidateQueries({ queryKey: ["stats"] });
       client.invalidateQueries({ queryKey: ["files"] });
     },
@@ -109,6 +128,12 @@ export default function TodayPage() {
   const more = useMutation({
     mutationFn: () => api.more(batch.data?.date),
     onSuccess: () => client.invalidateQueries({ queryKey: ["batch"] }),
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not find more files",
+      ),
   });
 
   const toggleAutoReview = useMutation({
@@ -130,10 +155,25 @@ export default function TodayPage() {
 
   const confirmTag = useMutation({
     mutationFn: (tag: Tag) => api.confirmTag(item!.id, tag.key, tag.value),
-    onSuccess: () => {
+    onSuccess: (result, tag) => {
+      if (result.tagsRevision !== null) setRevision(result.tagsRevision);
+      setTags((current) =>
+        current.map((entry) =>
+          entry.key === tag.key &&
+          valueNorm(entry.value) === valueNorm(tag.value)
+            ? { ...entry, source: "review" }
+            : entry,
+        ),
+      );
       client.invalidateQueries({ queryKey: ["batch"] });
       client.invalidateQueries({ queryKey: ["tags"] });
     },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not confirm the tag",
+      ),
   });
 
   if (batch.isLoading) {
@@ -176,7 +216,13 @@ export default function TodayPage() {
             {indexing.total.toLocaleString()} files checked ·{" "}
             {indexing.indexed.toLocaleString()} indexed
           </p>
-          <div className="progress-track mx-auto mt-4 max-w-sm">
+          <div
+            className="progress-track mx-auto mt-4 max-w-sm"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={indexing.total}
+            aria-valuenow={indexing.scanned}
+          >
             <div
               className="progress-fill"
               style={{
@@ -275,7 +321,13 @@ export default function TodayPage() {
           <div className="text-[11px] text-slate-500">goal {data.goal}</div>
         </div>
       </div>
-      <div className="progress-track">
+      <div
+        className="progress-track"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={data.total}
+        aria-valuenow={data.done}
+      >
         <div className="progress-fill" style={{ width: `${progress}%` }} />
       </div>
 
@@ -366,6 +418,7 @@ export default function TodayPage() {
             </summary>
             <textarea
               className="textarea mt-3"
+              aria-label="Description"
               placeholder="Optional context, story, or notes…"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
@@ -373,12 +426,18 @@ export default function TodayPage() {
           </details>
 
           {error && (
-            <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">
+            <div
+              role="alert"
+              className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200"
+            >
               {error}
             </div>
           )}
           {notice && (
-            <div className="rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">
+            <div
+              role="status"
+              className="rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100"
+            >
               {notice}
             </div>
           )}

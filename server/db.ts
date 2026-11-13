@@ -2,7 +2,7 @@ import { createRequire } from "node:module";
 import type { DatabaseSync as DatabaseSyncClass } from "node:sqlite";
 import path from "node:path";
 import type { Tag, FileSummary, MediaKind } from "../shared/types";
-import { dedupeTags, valueNorm } from "../shared/tag-format";
+import { dedupeTags, hasLegacyTags, valueNorm } from "../shared/tag-format";
 import { config } from "./config";
 
 // tsup/esbuild rewrites node:sqlite to "sqlite", which is not resolvable. Loading it
@@ -31,6 +31,8 @@ export type FileRow = {
   metadata_writable: number;
   legacy_pending: number;
   faces_processed: number;
+  faces_attempts: number;
+  tags_revision: number;
   scan_generation: number;
   indexed_at: string;
 };
@@ -62,6 +64,8 @@ CREATE TABLE IF NOT EXISTS files (
   metadata_writable INTEGER NOT NULL DEFAULT 1,
   legacy_pending INTEGER NOT NULL DEFAULT 0,
   faces_processed INTEGER NOT NULL DEFAULT 0,
+  faces_attempts INTEGER NOT NULL DEFAULT 0,
+  tags_revision INTEGER NOT NULL DEFAULT 0,
   scan_generation INTEGER NOT NULL DEFAULT 0,
   indexed_at TEXT NOT NULL
 );
@@ -70,6 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_files_gps ON files(gps_lat, gps_lon);
 CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder);
 CREATE INDEX IF NOT EXISTS idx_files_legacy ON files(legacy_pending);
 CREATE INDEX IF NOT EXISTS idx_files_capture ON files(capture_at);
+CREATE INDEX IF NOT EXISTS idx_files_move ON files(size, mtime_ms);
 
 CREATE TABLE IF NOT EXISTS tags (
   id INTEGER PRIMARY KEY,
@@ -134,6 +139,7 @@ CREATE TABLE IF NOT EXISTS undo_log (
   previous_description TEXT,
   new_tags TEXT NOT NULL,
   new_description TEXT,
+  previous_faces TEXT,
   undone INTEGER NOT NULL DEFAULT 0
 );
 
@@ -239,6 +245,35 @@ function ensureColumn(table: string, column: string, definition: string) {
 }
 ensureColumn("faces", "label_source", "label_source TEXT");
 ensureColumn("faces", "label_confidence", "label_confidence REAL");
+ensureColumn(
+  "files",
+  "faces_attempts",
+  "faces_attempts INTEGER NOT NULL DEFAULT 0",
+);
+ensureColumn(
+  "files",
+  "tags_revision",
+  "tags_revision INTEGER NOT NULL DEFAULT 0",
+);
+ensureColumn("undo_log", "previous_faces", "previous_faces TEXT");
+
+let tagMutationVersion = 0;
+
+/** Bumped whenever any file/tag association changes. Suggestion caches watch this. */
+export function currentTagMutationVersion(): number {
+  return tagMutationVersion;
+}
+
+export function bumpTagMutationVersion(): void {
+  tagMutationVersion++;
+}
+
+export function bumpTagsRevision(fileId: number): void {
+  statement(
+    "UPDATE files SET tags_revision = tags_revision + 1 WHERE id = ?",
+  ).run(fileId);
+  bumpTagMutationVersion();
+}
 
 const statementCache = new Map<
   string,
@@ -358,6 +393,55 @@ export function fileRowByPath(relativePath: string): FileRow | null {
   );
 }
 
+/** Best-effort detection of a moved/renamed file from the previous scan. */
+export function findMovedFileRow(input: {
+  size: number;
+  mtimeMs: number;
+  newPath: string;
+  generation: number;
+}): FileRow | null {
+  const rows = statement(
+    `SELECT * FROM files
+     WHERE size = ? AND mtime_ms = ? AND path <> ? AND scan_generation <> ?
+     LIMIT 2`,
+  ).all(
+    input.size,
+    input.mtimeMs,
+    input.newPath,
+    input.generation,
+  ) as FileRow[];
+  return rows.length === 1 ? rows[0]! : null;
+}
+
+export function adoptFilePath(
+  fileId: number,
+  input: {
+    relativePath: string;
+    name: string;
+    folder: string;
+    ext: string;
+    kind: MediaKind;
+    description: string | null;
+  },
+): void {
+  transaction(() => {
+    statement(
+      `UPDATE files SET path = ?, name = ?, folder = ?, ext = ?, kind = ?,
+         legacy_pending = ?, indexed_at = ? WHERE id = ?`,
+    ).run(
+      input.relativePath,
+      input.name,
+      input.folder,
+      input.ext,
+      input.kind,
+      hasLegacyTags(input.name, input.description ?? "") ? 1 : 0,
+      now(),
+      fileId,
+    );
+    updateFts(fileId);
+  });
+}
+
 export function tagsForFile(fileId: number): Tag[] {
   return statement(
     `SELECT t.key, t.value, ft.source FROM tags t
@@ -439,6 +523,7 @@ function replaceFileTagsUnsafe(
     }
   }
   updateFts(fileId);
+  bumpTagsRevision(fileId);
 }
 
 export function replaceFileTags(
@@ -482,6 +567,7 @@ export function promoteFileTagSource(
       "UPDATE faces SET label_source = ? WHERE file_id = ? AND person_tag_id = ? AND label_source = 'face-auto'",
     ).run(source, fileId, row.tag_id);
   }
+  bumpTagsRevision(fileId);
   return true;
 }
 
@@ -498,11 +584,14 @@ export function removeTagFromFileIfSource(
   ).get(fileId, tag.key, valueNorm(tag.value), source) as
     { tag_id: number } | undefined;
   if (!row) return false;
-  statement("DELETE FROM file_tags WHERE file_id = ? AND tag_id = ?").run(
-    fileId,
-    row.tag_id,
-  );
-  updateFts(fileId);
+  transaction(() => {
+    statement("DELETE FROM file_tags WHERE file_id = ? AND tag_id = ?").run(
+      fileId,
+      row.tag_id,
+    );
+    updateFts(fileId);
+    bumpTagsRevision(fileId);
+  });
   return true;
 }
 
@@ -568,6 +657,7 @@ export function upsertFile(input: UpsertFileInput): number {
         metadata_writable = excluded.metadata_writable,
         legacy_pending = excluded.legacy_pending,
         faces_processed = 0,
+        faces_attempts = 0,
         scan_generation = excluded.scan_generation,
         indexed_at = excluded.indexed_at`,
     ).run(
@@ -595,7 +685,8 @@ export function upsertFile(input: UpsertFileInput): number {
     const row = statement("SELECT id FROM files WHERE path = ?").get(
       input.relativePath,
     ) as { id: number };
-    statement("DELETE FROM faces WHERE file_id = ?").run(row.id);
+    // Keep face rows across reindexing. They are replaced after the file is
+    // reprocessed, and labelled faces can be matched back by embedding.
     replaceFileTagsUnsafe(row.id, input.tags, "import");
     return row.id;
   });
@@ -643,10 +734,12 @@ export function updateFilePath(
   size: number,
   mtimeMs: number,
 ): void {
-  statement(
-    "UPDATE files SET path = ?, name = ?, size = ?, mtime_ms = ?, indexed_at = ? WHERE id = ?",
-  ).run(relativePath, name, size, mtimeMs, now(), fileId);
-  updateFts(fileId);
+  transaction(() => {
+    statement(
+      "UPDATE files SET path = ?, name = ?, size = ?, mtime_ms = ?, indexed_at = ? WHERE id = ?",
+    ).run(relativePath, name, size, mtimeMs, now(), fileId);
+    updateFts(fileId);
+  });
 }
 
 export function fileRowsWithLegacy(): FileRow[] {
@@ -655,14 +748,29 @@ export function fileRowsWithLegacy(): FileRow[] {
   ).all() as FileRow[];
 }
 
-export function deleteMissingFiles(scanGeneration: number): number[] {
+export function deleteMissingFiles(scanGeneration: number): {
+  fileIds: number[];
+  faceIds: number[];
+} {
   const ids = statement("SELECT id FROM files WHERE scan_generation <> ?").all(
     scanGeneration,
   ) as { id: number }[];
-  statement("DELETE FROM files WHERE scan_generation <> ?").run(scanGeneration);
-  for (const row of ids)
-    statement("DELETE FROM files_fts WHERE rowid = ?").run(row.id);
-  return ids.map((row) => row.id);
+  const fileIds = ids.map((row) => row.id);
+  const faceIds = fileIds.length
+    ? (
+        statement(
+          `SELECT id FROM faces WHERE file_id IN (${fileIds.map(() => "?").join(",")})`,
+        ).all(...fileIds) as { id: number }[]
+      ).map((row) => row.id)
+    : [];
+  transaction(() => {
+    statement("DELETE FROM files WHERE scan_generation <> ?").run(
+      scanGeneration,
+    );
+    for (const row of ids)
+      statement("DELETE FROM files_fts WHERE rowid = ?").run(row.id);
+  });
+  return { fileIds, faceIds };
 }
 
 export function touchFileScan(fileId: number, scanGeneration: number): void {
@@ -737,6 +845,7 @@ export function promoteAutoTagsForFile(fileId: number): number {
   statement(
     "UPDATE faces SET label_source = 'review' WHERE file_id = ? AND label_source = 'face-auto'",
   ).run(fileId);
+  if (Number(result.changes) > 0) bumpTagsRevision(fileId);
   return Number(result.changes);
 }
 
@@ -764,10 +873,49 @@ export type FileListFilter = {
   legacyPending?: boolean;
   key?: string;
   value?: string;
-  cursor?: number;
+  cursor?: string;
   limit?: number;
   sort?: "newest" | "oldest" | "name";
 };
+
+export function fileListCursor(
+  row: FileRow,
+  sort: "newest" | "oldest" | "name" = "newest",
+): string {
+  if (sort === "oldest") {
+    const value = row.capture_at ?? row.indexed_at;
+    return `oldest:${encodeURIComponent(value)}:${row.id}`;
+  }
+  if (sort === "name") {
+    return `name:${encodeURIComponent(row.name)}:${row.id}`;
+  }
+  return `newest:${row.id}`;
+}
+
+function parseFileListCursor(cursor: string): {
+  sort: string;
+  value: string;
+  id: number;
+} | null {
+  const first = cursor.indexOf(":");
+  if (first < 0) return null;
+  const sort = cursor.slice(0, first);
+  const rest = cursor.slice(first + 1);
+  if (sort === "newest") {
+    const id = Number.parseInt(rest, 10);
+    return Number.isFinite(id) ? { sort, value: "", id } : null;
+  }
+  const last = rest.lastIndexOf(":");
+  if (last < 0) return null;
+  let value: string;
+  try {
+    value = decodeURIComponent(rest.slice(0, last));
+  } catch {
+    return null;
+  }
+  const id = Number.parseInt(rest.slice(last + 1), 10);
+  return Number.isFinite(id) ? { sort, value, id } : null;
+}
 
 export function listFileRows(filter: FileListFilter): FileRow[] {
   const conditions: string[] = [];
@@ -804,14 +952,28 @@ export function listFileRows(filter: FileListFilter): FileRow[] {
       params.push(terms.map((term) => `"${term}"*`).join(" AND "));
     }
   }
-  if (filter.cursor) {
-    conditions.push("f.id < ?");
-    params.push(filter.cursor);
+  const sort = filter.sort ?? "newest";
+  const cursor = filter.cursor ? parseFileListCursor(filter.cursor) : null;
+  if (cursor && cursor.sort === sort) {
+    if (sort === "oldest") {
+      conditions.push(
+        "(COALESCE(f.capture_at, f.indexed_at) > ? OR (COALESCE(f.capture_at, f.indexed_at) = ? AND f.id > ?))",
+      );
+      params.push(cursor.value, cursor.value, cursor.id);
+    } else if (sort === "name") {
+      conditions.push(
+        "(f.name COLLATE NOCASE > ? OR (f.name COLLATE NOCASE = ? AND f.id > ?))",
+      );
+      params.push(cursor.value, cursor.value, cursor.id);
+    } else {
+      conditions.push("f.id < ?");
+      params.push(cursor.id);
+    }
   }
   const order =
-    filter.sort === "oldest"
+    sort === "oldest"
       ? "COALESCE(f.capture_at, f.indexed_at) ASC, f.id ASC"
-      : filter.sort === "name"
+      : sort === "name"
         ? "f.name COLLATE NOCASE ASC, f.id ASC"
         : "f.id DESC";
   const limit = Math.max(1, Math.min(201, filter.limit ?? 40));
@@ -837,6 +999,7 @@ export function summaryFromRow(
         ? { lat: row.gps_lat, lon: row.gps_lon }
         : null,
     tags,
+    tagsRevision: row.tags_revision,
     legacyPending: row.legacy_pending === 1,
     thumbUrl: `/api/files/${row.id}/thumb?v=${row.mtime_ms}`,
     previewUrl: `/api/files/${row.id}/preview?v=${row.mtime_ms}`,
@@ -934,7 +1097,7 @@ export function untaggedCandidateRows(
      WHERE f.legacy_pending = 0
        AND ${candidateTagCondition(includeAuto)}
        ${exclusion}
-     ORDER BY COALESCE(f.capture_at, f.indexed_at) ASC, f.id ASC
+     ORDER BY RANDOM()
      LIMIT ?`,
   ).all(...excludeIds, limit) as FileRow[];
 }
@@ -953,7 +1116,7 @@ export function candidateRowsForBatch(
   if (seed.local_date) {
     rows.push(
       ...(statement(
-        `SELECT f.* FROM files f WHERE f.legacy_pending = 0 AND f.local_date = ? AND f.id <> ? AND ${candidateTagCondition(includeAuto)} ${exclusion} LIMIT ?`,
+        `SELECT f.* FROM files f WHERE f.legacy_pending = 0 AND f.local_date = ? AND f.id <> ? AND ${candidateTagCondition(includeAuto)} ${exclusion} ORDER BY RANDOM() LIMIT ?`,
       ).all(seed.local_date, seed.id, ...excludeIds, limit) as FileRow[]),
     );
   }
@@ -961,7 +1124,7 @@ export function candidateRowsForBatch(
     const remaining = limit - rows.length;
     rows.push(
       ...(statement(
-        `SELECT f.* FROM files f WHERE f.legacy_pending = 0 AND f.folder = ? AND f.id <> ? AND ${candidateTagCondition(includeAuto)} ${exclusion} LIMIT ?`,
+        `SELECT f.* FROM files f WHERE f.legacy_pending = 0 AND f.folder = ? AND f.id <> ? AND ${candidateTagCondition(includeAuto)} ${exclusion} ORDER BY RANDOM() LIMIT ?`,
       ).all(seed.folder, seed.id, ...excludeIds, remaining) as FileRow[]),
     );
   }
@@ -989,7 +1152,7 @@ export function autoOnlyCandidateRows(
            AND ft.source NOT IN ('face-auto', 'place-auto')
        )
        ${exclusion}
-     ORDER BY COALESCE(f.capture_at, f.indexed_at) ASC, f.id ASC
+     ORDER BY RANDOM()
      LIMIT ?`,
   ).all(...excludeIds, limit) as FileRow[];
 }
@@ -1022,14 +1185,14 @@ export function nearbyFileRows(
 export function sameDayFileRows(file: FileRow, limit = 150): FileRow[] {
   if (!file.local_date) return [];
   return statement(
-    `SELECT * FROM files WHERE id <> ? AND local_date = ? AND EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id) LIMIT ?`,
+    `SELECT * FROM files WHERE id <> ? AND local_date = ? AND EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id AND ft.source NOT IN ('face-auto', 'place-auto')) LIMIT ?`,
   ).all(file.id, file.local_date, limit) as FileRow[];
 }
 
 export function sameFolderFileRows(file: FileRow, limit = 150): FileRow[] {
   if (!file.folder) return [];
   return statement(
-    `SELECT * FROM files WHERE id <> ? AND folder = ? AND EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id) LIMIT ?`,
+    `SELECT * FROM files WHERE id <> ? AND folder = ? AND EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id AND ft.source NOT IN ('face-auto', 'place-auto')) LIMIT ?`,
   ).all(file.id, file.folder, limit) as FileRow[];
 }
 
@@ -1040,7 +1203,7 @@ export function sequenceFileRows(file: FileRow, limit = 20): FileRow[] {
   const prefix = numeric[1] ?? "";
   const number = Number(numeric[2]);
   const rows = statement(
-    `SELECT * FROM files WHERE folder = ? AND id <> ? AND name LIKE ? AND EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id) LIMIT ?`,
+    `SELECT * FROM files WHERE folder = ? AND id <> ? AND name LIKE ? AND EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = files.id AND ft.source NOT IN ('face-auto', 'place-auto')) LIMIT ?`,
   ).all(file.folder, file.id, `${prefix}%`, 200) as FileRow[];
   return rows
     .map((row) => {
@@ -1077,33 +1240,41 @@ export function filesSharingTags(
     `SELECT DISTINCT f.* FROM files f
      JOIN file_tags ft ON ft.file_id = f.id
      WHERE ft.tag_id IN (${tagIds.map(() => "?").join(",")}) AND f.id <> ?
+       AND ft.source NOT IN ('face-auto', 'place-auto')
      LIMIT ?`,
   ).all(...tagIds, file.id, limit) as FileRow[];
 }
 
 export function globalTagCounts(
   limit = 60,
-): { key: string; value: string; count: number }[] {
+): { key: string; value: string; count: number; lastUsed: string }[] {
   return statement(
-    `SELECT t.key, t.value, COUNT(*) AS count FROM tags t
-     JOIN file_tags ft ON ft.tag_id = t.id
+    `SELECT t.key, t.value, COUNT(*) AS count, MAX(ft.created_at) AS lastUsed
+     FROM tags t JOIN file_tags ft ON ft.tag_id = t.id
+     WHERE ft.source NOT IN ('face-auto', 'place-auto')
      GROUP BY t.id ORDER BY count DESC, t.key, t.value LIMIT ?`,
-  ).all(limit) as { key: string; value: string; count: number }[];
+  ).all(limit) as {
+    key: string;
+    value: string;
+    count: number;
+    lastUsed: string;
+  }[];
 }
 
 export function recentTagCounts(
   days = 30,
   limit = 40,
-): { key: string; value: string; count: number }[] {
+): { key: string; value: string; count: number; lastUsed: string }[] {
   return statement(
-    `SELECT t.key, t.value, COUNT(*) AS count FROM tags t
-     JOIN file_tags ft ON ft.tag_id = t.id
-     WHERE ft.created_at >= ?
-     GROUP BY t.id ORDER BY count DESC LIMIT ?`,
+    `SELECT t.key, t.value, COUNT(*) AS count, MAX(ft.created_at) AS lastUsed
+     FROM tags t JOIN file_tags ft ON ft.tag_id = t.id
+     WHERE ft.created_at >= ? AND ft.source NOT IN ('face-auto', 'place-auto')
+     GROUP BY t.id ORDER BY lastUsed DESC, count DESC LIMIT ?`,
   ).all(new Date(Date.now() - days * 86_400_000).toISOString(), limit) as {
     key: string;
     value: string;
     count: number;
+    lastUsed: string;
   }[];
 }
 
@@ -1131,9 +1302,10 @@ export function recordUndo(
   previousDescription: string,
   newTags: Tag[],
   newDescription: string,
+  previousFaces?: string,
 ): number {
   const result = statement(
-    "INSERT INTO undo_log(file_id, at, previous_tags, previous_description, new_tags, new_description) VALUES(?, ?, ?, ?, ?, ?)",
+    "INSERT INTO undo_log(file_id, at, previous_tags, previous_description, new_tags, new_description, previous_faces) VALUES(?, ?, ?, ?, ?, ?, ?)",
   ).run(
     fileId,
     now(),
@@ -1141,6 +1313,7 @@ export function recordUndo(
     previousDescription,
     JSON.stringify(newTags),
     newDescription,
+    previousFaces ?? null,
   );
   const id = Number(result.lastInsertRowid);
   statement("DELETE FROM undo_log WHERE id <= ?").run(id - 2000);
@@ -1152,17 +1325,23 @@ export function undoEntry(id: number): {
   file_id: number;
   previous_tags: string;
   previous_description: string | null;
+  new_tags: string;
+  new_description: string | null;
+  previous_faces: string | null;
   undone: number;
 } | null {
   return (
     (statement(
-      "SELECT id, file_id, previous_tags, previous_description, undone FROM undo_log WHERE id = ?",
+      "SELECT id, file_id, previous_tags, previous_description, new_tags, new_description, previous_faces, undone FROM undo_log WHERE id = ?",
     ).get(id) as
       | {
           id: number;
           file_id: number;
           previous_tags: string;
           previous_description: string | null;
+          new_tags: string;
+          new_description: string | null;
+          previous_faces: string | null;
           undone: number;
         }
       | undefined) ?? null
@@ -1288,11 +1467,15 @@ export function facesForFile(fileId: number): FaceRow[] {
 }
 
 export function markFacesFailed(fileId: number): void {
-  statement("UPDATE files SET faces_processed = 2 WHERE id = ?").run(fileId);
+  statement(
+    "UPDATE files SET faces_processed = 2, faces_attempts = faces_attempts + 1 WHERE id = ?",
+  ).run(fileId);
 }
 
 export function resetFacesProcessed(fileId: number): void {
-  statement("UPDATE files SET faces_processed = 0 WHERE id = ?").run(fileId);
+  statement(
+    "UPDATE files SET faces_processed = 0, faces_attempts = 0 WHERE id = ?",
+  ).run(fileId);
 }
 
 export function replaceFacesForFile(
@@ -1311,7 +1494,9 @@ export function replaceFacesForFile(
         "INSERT INTO faces(file_id, bbox, embedding, quality, created_at) VALUES(?, ?, ?, ?, ?)",
       ).run(fileId, JSON.stringify(face.bbox), buffer, face.quality, now());
     }
-    statement("UPDATE files SET faces_processed = 1 WHERE id = ?").run(fileId);
+    statement(
+      "UPDATE files SET faces_processed = 1, faces_attempts = 0 WHERE id = ?",
+    ).run(fileId);
   });
 }
 

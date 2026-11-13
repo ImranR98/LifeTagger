@@ -10,6 +10,7 @@ import {
   UserRound,
 } from "lucide-react";
 import type { Face, Tag } from "@shared/types";
+import { valueNorm } from "@shared/tag-format";
 import { api } from "../api";
 import { MediaViewer } from "../components/MediaViewer";
 import { TagEditor } from "../components/TagEditor";
@@ -36,6 +37,7 @@ export default function FileDetailPage() {
   );
   const [tags, setTags] = useState<Tag[]>([]);
   const [description, setDescription] = useState("");
+  const [revision, setRevision] = useState<number | undefined>(undefined);
   const [undoId, setUndoId] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -47,11 +49,18 @@ export default function FileDetailPage() {
     }
   }, [file.data?.id, file.data?.tags.length, file.data?.description]);
 
+  useEffect(() => {
+    setRevision(file.data?.tagsRevision);
+  }, [file.data?.id, file.data?.tagsRevision]);
+
   const save = useMutation({
-    mutationFn: () => api.save(fileId, tags, description),
+    mutationFn: () => api.save(fileId, tags, description, undefined, revision),
     onSuccess: (result) => {
       setError(null);
       setUndoId(result.undoId);
+      setTags(result.tags);
+      setDescription(result.description);
+      setRevision(result.tagsRevision);
       setNotice(
         result.metadataWritable
           ? "Saved to the file metadata."
@@ -71,13 +80,23 @@ export default function FileDetailPage() {
 
   const undo = useMutation({
     mutationFn: () => api.undo(undoId!),
-    onSuccess: () => {
+    onSuccess: (result) => {
       setError(null);
       setUndoId(null);
+      setTags(result.tags);
+      setDescription(result.description);
+      setRevision(result.tagsRevision);
       setNotice("Change undone.");
       client.invalidateQueries({ queryKey: ["file", fileId] });
       client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["tags"] });
+      client.invalidateQueries({ queryKey: ["files"] });
+      client.invalidateQueries({ queryKey: ["stats"] });
     },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error ? mutationError.message : "Undo failed",
+      ),
   });
 
   const detect = useMutation({
@@ -86,15 +105,39 @@ export default function FileDetailPage() {
       setError(null);
       client.invalidateQueries({ queryKey: ["file", fileId] });
       client.invalidateQueries({ queryKey: ["people"] });
+      client.invalidateQueries({ queryKey: ["clusters"] });
     },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Face detection failed",
+      ),
   });
 
   const confirmTag = useMutation({
     mutationFn: (tag: Tag) => api.confirmTag(fileId, tag.key, tag.value),
-    onSuccess: () => {
+    onSuccess: (result, tag) => {
+      if (result.tagsRevision !== null) setRevision(result.tagsRevision);
+      setTags((current) =>
+        current.map((entry) =>
+          entry.key === tag.key &&
+          valueNorm(entry.value) === valueNorm(tag.value)
+            ? { ...entry, source: "review" }
+            : entry,
+        ),
+      );
       client.invalidateQueries({ queryKey: ["file", fileId] });
       client.invalidateQueries({ queryKey: ["tags"] });
+      client.invalidateQueries({ queryKey: ["batch"] });
+      client.invalidateQueries({ queryKey: ["people"] });
     },
+    onError: (mutationError) =>
+      setError(
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Could not confirm the tag",
+      ),
   });
 
   if (file.isLoading) return <div className="skeleton h-96 rounded-3xl" />;
@@ -230,12 +273,18 @@ export default function FileDetailPage() {
           </div>
 
           {error && (
-            <div className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200">
+            <div
+              role="alert"
+              className="rounded-xl border border-rose-400/30 bg-rose-400/10 p-3 text-sm text-rose-200"
+            >
               {error}
             </div>
           )}
           {notice && (
-            <div className="flex items-center justify-between gap-3 rounded-xl border border-teal-300/20 bg-teal-300/10 p-3 text-sm text-teal-100">
+            <div
+              role="status"
+              className="flex items-center justify-between gap-3 rounded-xl border border-teal-300/20 bg-teal-300/10 p-3 text-sm text-teal-100"
+            >
               <span>{notice}</span>
               {undoId && (
                 <button
@@ -317,6 +366,7 @@ function FaceLabel({
       </span>
       <input
         className="input min-h-9 py-1.5"
+        aria-label={`Name for face ${index + 1}`}
         value={name}
         disabled={disabled}
         onChange={(event) => setName(event.target.value)}
@@ -324,6 +374,7 @@ function FaceLabel({
       />
       <button
         className="btn px-3 py-1.5 text-xs"
+        aria-label={`Save name for face ${index + 1}`}
         onClick={() => label.mutate()}
         disabled={label.isPending || disabled}
       >
@@ -333,6 +384,11 @@ function FaceLabel({
           <Check size={13} />
         )}
       </button>
+      {label.isError && (
+        <span role="alert" className="text-xs text-rose-300">
+          {label.error instanceof Error ? label.error.message : "Label failed"}
+        </span>
+      )}
     </div>
   );
 }

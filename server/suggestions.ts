@@ -1,6 +1,7 @@
 import type { Tag } from "../shared/types";
 import type { FileRow } from "./db";
 import {
+  currentTagMutationVersion,
   filesSharingTags,
   getSetting,
   globalTagCounts,
@@ -24,6 +25,7 @@ type Source =
   | "sequence"
   | "co-occurrence"
   | "recent"
+  | "global"
   | "face";
 
 type Aggregate = {
@@ -34,6 +36,7 @@ type Aggregate = {
   evidence: Set<number>;
   source: Source;
   distance?: number;
+  lastUsed?: string;
 };
 
 export type Neighbor = {
@@ -134,8 +137,13 @@ export function buildNeighbors(file: FileRow): Neighbor[] {
   for (const row of sequenceFileRows(file)) {
     add(row, 0.68, "sequence");
   }
-  for (const row of filesSharingTags(file, tagsForFile(file.id))) {
-    add(row, 0.36, "co-occurrence");
+  const trustedTags = tagsForFile(file.id).filter(
+    (tag) => tag.source !== "face-auto" && tag.source !== "place-auto",
+  );
+  if (trustedTags.length > 0) {
+    for (const row of filesSharingTags(file, trustedTags)) {
+      add(row, 0.7, "co-occurrence");
+    }
   }
   return Array.from(neighbors.values());
 }
@@ -145,13 +153,14 @@ function keyWeight(key: string, source: Source): number {
     if (source === "gps") return 1;
     if (source === "same-folder") return 0.75;
     if (source === "same-day") return 0.55;
+    if (source === "co-occurrence") return 0.7;
     return 0.3;
   }
   if (key === "event") {
     if (source === "same-day") return 1;
     if (source === "same-folder") return 0.9;
     if (source === "gps") return 0.8;
-    if (source === "co-occurrence") return 0.5;
+    if (source === "co-occurrence") return 0.65;
     return 0.4;
   }
   if (key === "people") {
@@ -159,16 +168,17 @@ function keyWeight(key: string, source: Source): number {
     if (source === "sequence") return 0.9;
     if (source === "same-folder") return 0.75;
     if (source === "gps") return 0.7;
-    if (source === "co-occurrence") return 0.55;
+    if (source === "co-occurrence") return 0.6;
     return 0.4;
   }
   if (key === "mood") {
-    if (source === "co-occurrence") return 0.75;
+    if (source === "co-occurrence") return 0.8;
     if (source === "same-day") return 0.55;
     return 0.35;
   }
   if (source === "face") return 1;
   if (source === "recent") return 0.45;
+  if (source === "co-occurrence") return 0.7;
   return 0.6;
 }
 
@@ -211,19 +221,61 @@ function capFor(key: string): number {
   return 3;
 }
 
+type PriorRow = {
+  key: string;
+  value: string;
+  count: number;
+  lastUsed: string;
+  source: "recent" | "global";
+};
+
 let priorCache: {
   at: number;
-  rows: { key: string; value: string; count: number }[];
+  version: number;
+  rows: PriorRow[];
 } | null = null;
 
-function priorRows(): { key: string; value: string; count: number }[] {
-  if (!priorCache || Date.now() - priorCache.at > 30_000) {
-    priorCache = {
-      at: Date.now(),
-      rows: [...recentTagCounts(30, 30), ...globalTagCounts(30)],
-    };
+function priorRows(): PriorRow[] {
+  const version = currentTagMutationVersion();
+  if (
+    !priorCache ||
+    priorCache.version !== version ||
+    Date.now() - priorCache.at > 30_000
+  ) {
+    const seen = new Set<string>();
+    const rows: PriorRow[] = [];
+    for (const row of recentTagCounts(30, 40)) {
+      const id = `${row.key}\u0000${valueNorm(row.value)}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      rows.push({ ...row, source: "recent" });
+    }
+    for (const row of globalTagCounts(40)) {
+      const id = `${row.key}\u0000${valueNorm(row.value)}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      rows.push({ ...row, source: "global" });
+    }
+    priorCache = { at: Date.now(), version, rows };
   }
   return priorCache.rows;
+}
+
+const DAY_MS = 86_400_000;
+
+function recencyBoost(lastUsed: string): number {
+  const age = Date.now() - Date.parse(lastUsed);
+  if (!Number.isFinite(age)) return 0;
+  if (age <= DAY_MS) return 0.22;
+  if (age <= 7 * DAY_MS) return 0.14;
+  if (age <= 30 * DAY_MS) return 0.06;
+  return 0;
+}
+
+function isRecent(lastUsed: string | undefined, days: number): boolean {
+  if (!lastUsed) return false;
+  const age = Date.now() - Date.parse(lastUsed);
+  return Number.isFinite(age) && age <= days * DAY_MS;
 }
 
 export function clearSuggestionCache(): void {
@@ -234,10 +286,9 @@ export function suggestionsForFile(
   file: FileRow,
   date?: string,
 ): ReturnType<typeof rankSuggestions> {
+  const fileTags = tagsForFile(file.id);
   const current = new Set(
-    tagsForFile(file.id).map(
-      (tag) => `${tag.key}\u0000${valueNorm(tag.value)}`,
-    ),
+    fileTags.map((tag) => `${tag.key}\u0000${valueNorm(tag.value)}`),
   );
   const rejected = date
     ? rejectedSuggestions(date, file.id)
@@ -249,6 +300,7 @@ export function suggestionsForFile(
   for (const neighbor of neighbors) {
     const tags = tagMap.get(neighbor.row.id) ?? [];
     for (const tag of tags) {
+      if (tag.source === "face-auto" || tag.source === "place-auto") continue;
       const id = `${tag.key}\u0000${valueNorm(tag.value)}`;
       if (current.has(id) || rejected.has(id)) continue;
       const weighted = neighbor.weight * keyWeight(tag.key, neighbor.source);
@@ -275,17 +327,25 @@ export function suggestionsForFile(
     }
   }
 
-  for (const [index, row] of priorRows().entries()) {
-    const tag = { key: row.key, value: row.value };
-    const id = `${tag.key}\u0000${valueNorm(tag.value)}`;
+  for (const row of priorRows()) {
+    const id = `${row.key}\u0000${valueNorm(row.value)}`;
     if (current.has(id) || rejected.has(id) || aggregates.has(id)) continue;
+    const recent = row.source === "recent";
     aggregates.set(id, {
-      key: tag.key,
-      value: tag.value,
-      score: Math.min(0.4, 0.22 + row.count * 0.015) - index * 0.001,
+      key: row.key,
+      value: row.value,
+      score: recent
+        ? Math.min(
+            0.99,
+            0.34 +
+              Math.min(0.14, row.count * 0.02) +
+              recencyBoost(row.lastUsed),
+          )
+        : Math.min(0.4, 0.22 + row.count * 0.015),
       support: 1,
       evidence: new Set(),
-      source: "recent",
+      source: row.source,
+      lastUsed: row.lastUsed,
     });
   }
 
@@ -313,7 +373,6 @@ export function suggestionsForFile(
 }
 
 export function rankSuggestions(aggregates: Aggregate[]) {
-  const groups = new Map<string, number>();
   const ranked = aggregates
     .map((aggregate) => {
       const supportBonus = Math.min(
@@ -333,18 +392,66 @@ export function rankSuggestions(aggregates: Aggregate[]) {
           aggregate.distance,
         ),
         evidence: Array.from(aggregate.evidence).slice(0, 5),
+        source: aggregate.source,
+        lastUsed: aggregate.lastUsed,
       };
     })
     .filter((suggestion) => suggestion.score >= 0.3)
-    .sort((a, b) => b.score - a.score);
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        (b.lastUsed ? Date.parse(b.lastUsed) : 0) -
+          (a.lastUsed ? Date.parse(a.lastUsed) : 0),
+    );
+
+  const byKey = new Map<string, typeof ranked>();
+  for (const suggestion of ranked) {
+    const list = byKey.get(suggestion.key) ?? [];
+    list.push(suggestion);
+    byKey.set(suggestion.key, list);
+  }
 
   const result: typeof ranked = [];
-  for (const suggestion of ranked) {
-    const used = groups.get(suggestion.key) ?? 0;
-    if (used >= capFor(suggestion.key)) continue;
-    groups.set(suggestion.key, used + 1);
-    result.push(suggestion);
+  for (const [key, suggestions] of byKey) {
+    const cap = capFor(key);
+    const selected = suggestions.slice(0, cap);
+    // Reserve slots for recently used tags, so newly added values can
+    // displace stale suggestions even when a key is already at its cap.
+    if (selected.length === cap) {
+      const excludedRecent = suggestions
+        .slice(cap)
+        .filter(
+          (suggestion) =>
+            suggestion.source === "recent" && isRecent(suggestion.lastUsed, 14),
+        )
+        .sort(
+          (a, b) =>
+            (b.lastUsed ? Date.parse(b.lastUsed) : 0) -
+            (a.lastUsed ? Date.parse(a.lastUsed) : 0),
+        );
+      for (const recent of excludedRecent) {
+        const replaceAt = selected
+          .map((suggestion, index) => ({ suggestion, index }))
+          .filter(
+            ({ suggestion }) =>
+              !(
+                suggestion.source === "recent" &&
+                isRecent(suggestion.lastUsed, 14)
+              ),
+          )
+          .sort((a, b) => a.suggestion.score - b.suggestion.score)[0]?.index;
+        if (replaceAt === undefined) break;
+        selected[replaceAt] = recent;
+      }
+    }
+    result.push(...selected);
   }
+  result.sort(
+    (a, b) =>
+      b.score - a.score ||
+      (b.lastUsed ? Date.parse(b.lastUsed) : 0) -
+        (a.lastUsed ? Date.parse(a.lastUsed) : 0),
+  );
   return result;
 }
 

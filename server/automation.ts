@@ -33,6 +33,7 @@ import {
   isTaskRunning,
   updateTask,
 } from "./tasks";
+import { withFileLock } from "./file-lock";
 
 export type AutomationSettings = {
   faceAutoThreshold: number;
@@ -161,7 +162,85 @@ function insertSuggestion(input: {
       nowIso(),
       input.status === "pending" ? null : nowIso(),
     );
+  if (Number(result.changes) === 0 && input.status === "pending") {
+    db.prepare(
+      `UPDATE automation_suggestions
+       SET run_id = ?, confidence = ?, distance_m = ?, details = ?, created_at = ?
+       WHERE kind = ? AND file_id = ? AND subject_id = ? AND key = ? AND value_norm = ?
+         AND status = 'pending'`,
+    ).run(
+      input.runId,
+      input.confidence,
+      input.distanceM,
+      input.details ? JSON.stringify(input.details) : null,
+      nowIso(),
+      input.kind,
+      input.fileId,
+      subjectId,
+      input.key,
+      valueNorm(input.value),
+    );
+  }
   return Number(result.changes) > 0;
+}
+
+function supersedeOtherPendingSuggestions(input: {
+  kind: "face" | "place";
+  fileId: number;
+  subjectId: number;
+  key: string;
+  value: string;
+}): void {
+  db.prepare(
+    `UPDATE automation_suggestions
+     SET status = 'rejected', decided_at = ?
+     WHERE status = 'pending' AND kind = ? AND file_id = ? AND subject_id = ?
+       AND key = ? AND value_norm <> ?`,
+  ).run(
+    nowIso(),
+    input.kind,
+    input.fileId,
+    input.subjectId,
+    input.key,
+    valueNorm(input.value),
+  );
+}
+
+function markSuggestionApproved(input: {
+  runId: number;
+  kind: "face" | "place";
+  fileId: number;
+  faceId: number | null;
+  key: string;
+  value: string;
+  confidence: number;
+  distanceM: number | null;
+  details?: Record<string, unknown>;
+}): void {
+  const subjectId = input.faceId ?? 0;
+  const result = db
+    .prepare(
+      `UPDATE automation_suggestions
+       SET status = 'approved', run_id = ?, confidence = ?, distance_m = ?,
+           details = ?, decided_at = ?
+       WHERE kind = ? AND file_id = ? AND subject_id = ? AND key = ? AND value_norm = ?
+         AND status = 'pending'`,
+    )
+    .run(
+      input.runId,
+      input.confidence,
+      input.distanceM,
+      input.details ? JSON.stringify(input.details) : null,
+      nowIso(),
+      input.kind,
+      input.fileId,
+      subjectId,
+      input.key,
+      valueNorm(input.value),
+    );
+  if (Number(result.changes) === 0) {
+    insertSuggestion({ ...input, status: "approved" });
+  }
 }
 
 async function persistFileTags(fileId: number): Promise<boolean> {
@@ -192,6 +271,18 @@ async function persistFileTags(fileId: number): Promise<boolean> {
   } catch (error) {
     serverLog.warn("automation metadata write failed", row.path, error);
     return false;
+  }
+}
+
+async function persistFiles(
+  fileIds: Iterable<number>,
+  counts: { errors: number },
+): Promise<void> {
+  for (const fileId of fileIds) {
+    if (!(await withFileLock(fileId, () => persistFileTags(fileId)))) {
+      counts.errors++;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
 }
 
@@ -249,10 +340,11 @@ export function startPlaceAutomation(): {
 }
 
 async function runPlaceAutomation(): Promise<void> {
-  const settings = automationSettings();
-  const runId = createRun("place-auto", settings);
   const counts = { processed: 0, auto: 0, review: 0, errors: 0 };
+  let runId: number | null = null;
   try {
+    const settings = automationSettings();
+    runId = createRun("place-auto", settings);
     const references = db
       .prepare(
         `SELECT f.gps_lat AS lat, f.gps_lon AS lon, t.value AS place
@@ -275,6 +367,7 @@ async function runPlaceAutomation(): Promise<void> {
       .prepare(
         `SELECT f.* FROM files f
          WHERE f.gps_lat IS NOT NULL AND f.gps_lon IS NOT NULL
+           AND f.legacy_pending = 0
            AND NOT EXISTS (
              SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
              WHERE ft.file_id = f.id AND t.key = 'place'
@@ -289,7 +382,7 @@ async function runPlaceAutomation(): Promise<void> {
     setRunTotal(runId, targets.length);
     updateTask({ total: targets.length, processed: 0 });
 
-    const cellSize = 0.01;
+    const cellSize = Math.max(0.01, settings.placeReviewRadiusM / 111_320 / 10);
     const grid = new Map<
       string,
       { lat: number; lon: number; place: string }[]
@@ -315,9 +408,18 @@ async function runPlaceAutomation(): Promise<void> {
         const lon = file.gps_lon!;
         const cellLat = Math.floor(lat / cellSize);
         const cellLon = Math.floor(lon / cellSize);
+        const latSteps = Math.ceil(
+          settings.placeReviewRadiusM / (111_320 * cellSize),
+        );
+        const lonSteps = Math.ceil(
+          settings.placeReviewRadiusM /
+            (111_320 *
+              Math.max(0.01, Math.cos((lat * Math.PI) / 180)) *
+              cellSize),
+        );
         const bestByPlace = new Map<string, number>();
-        for (let dLat = -1; dLat <= 1; dLat++) {
-          for (let dLon = -1; dLon <= 1; dLon++) {
+        for (let dLat = -latSteps; dLat <= latSteps; dLat++) {
+          for (let dLon = -lonSteps; dLon <= lonSteps; dLon++) {
             const cell = grid.get(`${cellLat + dLat}:${cellLon + dLon}`) ?? [];
             for (const reference of cell) {
               const distance = haversineMeters(
@@ -346,50 +448,58 @@ async function runPlaceAutomation(): Promise<void> {
         const ambiguous =
           Boolean(second) &&
           second!.distance <= Math.max(settings.placeAutoRadiusM * 2, 100);
-        const existing = suggestionStatus(
-          "place",
-          file.id,
-          0,
-          "place",
-          best.place,
-        );
-        if (existing) continue;
-        if (best.distance <= settings.placeAutoRadiusM && !ambiguous) {
-          addTagToFile(
+        await withFileLock(file.id, async () => {
+          const existing = suggestionStatus(
+            "place",
             file.id,
-            { key: "place", value: best.place },
-            "place-auto",
+            0,
+            "place",
+            best.place,
           );
-          insertSuggestion({
-            runId,
+          if (existing === "approved" || existing === "rejected") return;
+          supersedeOtherPendingSuggestions({
             kind: "place",
             fileId: file.id,
-            faceId: null,
+            subjectId: 0,
             key: "place",
             value: best.place,
-            confidence,
-            distanceM: best.distance,
-            details: { second: second ?? null },
-            status: "approved",
           });
-          const written = await persistFileTags(file.id);
-          if (!written) counts.errors++;
-          counts.auto++;
-        } else {
-          const inserted = insertSuggestion({
-            runId,
-            kind: "place",
-            fileId: file.id,
-            faceId: null,
-            key: "place",
-            value: best.place,
-            confidence,
-            distanceM: best.distance,
-            details: { second: second ?? null, ambiguous },
-            status: "pending",
-          });
-          if (inserted) counts.review++;
-        }
+          if (best.distance <= settings.placeAutoRadiusM && !ambiguous) {
+            addTagToFile(
+              file.id,
+              { key: "place", value: best.place },
+              "place-auto",
+            );
+            markSuggestionApproved({
+              runId: runId!,
+              kind: "place",
+              fileId: file.id,
+              faceId: null,
+              key: "place",
+              value: best.place,
+              confidence,
+              distanceM: best.distance,
+              details: { second: second ?? null },
+            });
+            const written = await persistFileTags(file.id);
+            if (!written) counts.errors++;
+            counts.auto++;
+          } else {
+            const inserted = insertSuggestion({
+              runId: runId!,
+              kind: "place",
+              fileId: file.id,
+              faceId: null,
+              key: "place",
+              value: best.place,
+              confidence,
+              distanceM: best.distance,
+              details: { second: second ?? null, ambiguous },
+              status: "pending",
+            });
+            if (inserted || existing === "pending") counts.review++;
+          }
+        });
       } catch (error) {
         counts.errors++;
         serverLog.warn("place automation failed", file.path, error);
@@ -406,10 +516,13 @@ async function runPlaceAutomation(): Promise<void> {
   } catch (error) {
     counts.errors++;
     finishTask(1, "Place automation failed");
-    finishRun(runId, "failed", counts);
+    if (runId !== null) finishRun(runId, "failed", counts);
     throw error;
   } finally {
     updateTask({ processed: counts.processed, errors: counts.errors });
+    if (isTaskRunning()) {
+      finishTask(counts.errors, "Place automation stopped");
+    }
   }
 }
 
@@ -438,10 +551,18 @@ export function startFaceAutomation(): {
 }
 
 async function runFaceAutomation(): Promise<void> {
-  const settings = automationSettings();
-  const runId = createRun("face-auto", settings);
   const counts = { processed: 0, auto: 0, review: 0, errors: 0 };
+  let runId: number | null = null;
+  const filesToPersist = new Set<number>();
+  const flush = async () => {
+    if (filesToPersist.size === 0) return;
+    updateTask({ phase: "Writing metadata" });
+    await persistFiles(filesToPersist, counts);
+    filesToPersist.clear();
+  };
   try {
+    const settings = automationSettings();
+    runId = createRun("face-auto", settings);
     const references = referenceFaces();
     if (references.length === 0) {
       finishTask(0, "No trusted face labels available");
@@ -459,25 +580,28 @@ async function runFaceAutomation(): Promise<void> {
     const total = (
       db
         .prepare(
-          "SELECT COUNT(*) AS count FROM faces WHERE person_tag_id IS NULL AND quality >= ?",
+          `SELECT COUNT(*) AS count FROM faces
+           WHERE person_tag_id IS NULL AND quality >= ?
+             AND EXISTS (SELECT 1 FROM files f WHERE f.id = faces.file_id AND f.legacy_pending = 0)`,
         )
         .get(settings.faceMinQuality) as { count: number }
     ).count;
     setRunTotal(runId, total);
     updateTask({ total, processed: 0, phase: "Matching faces" });
     let lastId = 0;
-    const filesToPersist = new Set<number>();
 
     while (true) {
       if (isTaskCancelRequested()) {
+        await flush();
         finishTask(counts.errors, "Face matching cancelled");
         finishRun(runId, "cancelled", counts);
         return;
       }
       const rows = db
         .prepare(
-          `SELECT * FROM faces
+          `SELECT faces.* FROM faces
            WHERE person_tag_id IS NULL AND quality >= ? AND id > ?
+             AND EXISTS (SELECT 1 FROM files f WHERE f.id = faces.file_id AND f.legacy_pending = 0)
            ORDER BY id LIMIT 250`,
         )
         .all(settings.faceMinQuality, lastId) as FaceRow[];
@@ -505,57 +629,65 @@ async function runFaceAutomation(): Promise<void> {
             }
           }
           if (!bestPerson || best < settings.faceReviewThreshold) continue;
-          const existing = suggestionStatus(
-            "face",
-            face.file_id,
-            face.id,
-            "people",
-            bestPerson,
-          );
-          if (existing) continue;
-          if (
-            best >= settings.faceAutoThreshold &&
-            best - second >= settings.faceAutoMargin
-          ) {
-            setFaceLabel(face.id, bestPerson, {
-              source: "face-auto",
-              confidence: best,
-              runId,
-            });
-            addTagToFile(
+          await withFileLock(face.file_id, async () => {
+            const existing = suggestionStatus(
+              "face",
               face.file_id,
-              { key: "people", value: bestPerson },
-              "face-auto",
+              face.id,
+              "people",
+              bestPerson,
             );
-            insertSuggestion({
-              runId,
+            if (existing === "approved" || existing === "rejected") return;
+            supersedeOtherPendingSuggestions({
               kind: "face",
               fileId: face.file_id,
-              faceId: face.id,
+              subjectId: face.id,
               key: "people",
               value: bestPerson,
-              confidence: best,
-              distanceM: null,
-              details: { margin: best - second },
-              status: "approved",
             });
-            filesToPersist.add(face.file_id);
-            counts.auto++;
-          } else {
-            const inserted = insertSuggestion({
-              runId,
-              kind: "face",
-              fileId: face.file_id,
-              faceId: face.id,
-              key: "people",
-              value: bestPerson,
-              confidence: best,
-              distanceM: null,
-              details: { margin: best - second },
-              status: "pending",
-            });
-            if (inserted) counts.review++;
-          }
+            if (
+              best >= settings.faceAutoThreshold &&
+              best - second >= settings.faceAutoMargin
+            ) {
+              setFaceLabel(face.id, bestPerson, {
+                source: "face-auto",
+                confidence: best,
+                runId: runId!,
+              });
+              addTagToFile(
+                face.file_id,
+                { key: "people", value: bestPerson },
+                "face-auto",
+              );
+              markSuggestionApproved({
+                runId: runId!,
+                kind: "face",
+                fileId: face.file_id,
+                faceId: face.id,
+                key: "people",
+                value: bestPerson,
+                confidence: best,
+                distanceM: null,
+                details: { margin: best - second },
+              });
+              filesToPersist.add(face.file_id);
+              counts.auto++;
+            } else {
+              const inserted = insertSuggestion({
+                runId: runId!,
+                kind: "face",
+                fileId: face.file_id,
+                faceId: face.id,
+                key: "people",
+                value: bestPerson,
+                confidence: best,
+                distanceM: null,
+                details: { margin: best - second },
+                status: "pending",
+              });
+              if (inserted || existing === "pending") counts.review++;
+            }
+          });
         } catch (error) {
           counts.errors++;
           serverLog.warn("face automation failed", face.id, error);
@@ -566,11 +698,7 @@ async function runFaceAutomation(): Promise<void> {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
 
-    updateTask({ phase: "Writing metadata" });
-    for (const fileId of filesToPersist) {
-      if (!(await persistFileTags(fileId))) counts.errors++;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
+    await flush();
     invalidateKnownFaces();
     finishTask(
       counts.errors,
@@ -579,11 +707,17 @@ async function runFaceAutomation(): Promise<void> {
     finishRun(runId, "complete", counts);
   } catch (error) {
     counts.errors++;
+    try {
+      await flush();
+    } catch {
+      // Keep the original failure as the reported task error.
+    }
     finishTask(1, "Face matching failed");
-    finishRun(runId, "failed", counts);
+    if (runId !== null) finishRun(runId, "failed", counts);
     throw error;
   } finally {
     updateTask({ processed: counts.processed, errors: counts.errors });
+    if (isTaskRunning()) finishTask(counts.errors, "Face matching stopped");
   }
 }
 
@@ -615,7 +749,9 @@ export function startFaceScan(options: { autoMatch?: boolean } = {}): {
     return { started: false, reason: "Another task is already running" };
   const total = (
     db
-      .prepare("SELECT COUNT(*) AS count FROM files WHERE faces_processed = 0")
+      .prepare(
+        "SELECT COUNT(*) AS count FROM files WHERE faces_processed = 0 OR (faces_processed = 2 AND faces_attempts < 3)",
+      )
       .get() as {
       count: number;
     }
@@ -637,13 +773,15 @@ export function startFaceScan(options: { autoMatch?: boolean } = {}): {
 }
 
 async function runFaceScan(options: { autoMatch?: boolean }): Promise<void> {
-  const runId = createRun("face-scan", options);
   const counts = { processed: 0, auto: 0, review: 0, errors: 0 };
+  let runId: number | null = null;
+  let taskFinished = false;
   try {
+    runId = createRun("face-scan", options);
     const total = (
       db
         .prepare(
-          "SELECT COUNT(*) AS count FROM files WHERE faces_processed = 0",
+          "SELECT COUNT(*) AS count FROM files WHERE faces_processed = 0 OR (faces_processed = 2 AND faces_attempts < 3)",
         )
         .get() as { count: number }
     ).count;
@@ -652,12 +790,13 @@ async function runFaceScan(options: { autoMatch?: boolean }): Promise<void> {
     while (true) {
       if (isTaskCancelRequested()) {
         finishTask(counts.errors, "Face scan cancelled");
+        taskFinished = true;
         finishRun(runId, "cancelled", counts);
         return;
       }
       const rows = db
         .prepare(
-          "SELECT * FROM files WHERE faces_processed = 0 AND id > ? ORDER BY id LIMIT 20",
+          "SELECT * FROM files WHERE (faces_processed = 0 OR (faces_processed = 2 AND faces_attempts < 3)) AND id > ? ORDER BY id LIMIT 20",
         )
         .all(lastId) as FileRow[];
       if (rows.length === 0) break;
@@ -672,13 +811,19 @@ async function runFaceScan(options: { autoMatch?: boolean }): Promise<void> {
       }
     }
     finishTask(counts.errors, "Face scan complete");
+    taskFinished = true;
     finishRun(runId, "complete", counts);
     if (options.autoMatch) startFaceAutomation();
   } catch (error) {
     counts.errors++;
     finishTask(1, "Face scan failed");
-    finishRun(runId, "failed", counts);
+    taskFinished = true;
+    if (runId !== null) finishRun(runId, "failed", counts);
     throw error;
+  } finally {
+    if (!taskFinished && isTaskRunning()) {
+      finishTask(counts.errors, "Face scan stopped");
+    }
   }
 }
 
@@ -769,11 +914,13 @@ export function rejectReviewSuggestions(ids: number[]): number {
 }
 
 export function resetRejectedSuggestions(): number {
-  return Number(
+  const deleted = Number(
     db
       .prepare("DELETE FROM automation_suggestions WHERE status = 'rejected'")
       .run().changes,
   );
+  db.prepare("DELETE FROM suggestion_feedback").run();
+  return deleted;
 }
 
 export function startReviewApproval(ids: number[]): {
@@ -831,12 +978,19 @@ async function runReviewApproval(
     confidence: number;
   }[],
 ): Promise<void> {
-  const runId = createRun("review-apply", { count: rows.length });
   const counts = { processed: 0, auto: 0, review: 0, errors: 0 };
+  let runId: number | null = null;
   const filesToPersist = new Set<number>();
+  const flush = async () => {
+    if (filesToPersist.size === 0) return;
+    await persistFiles(filesToPersist, counts);
+    filesToPersist.clear();
+  };
   try {
+    runId = createRun("review-apply", { count: rows.length });
     for (const row of rows) {
       if (isTaskCancelRequested()) {
+        await flush();
         finishTask(counts.errors, "Review apply cancelled");
         finishRun(runId, "cancelled", counts);
         return;
@@ -844,52 +998,54 @@ async function runReviewApproval(
       counts.processed++;
       try {
         const suggestion = row;
-        if (suggestion.kind === "face") {
-          if (!suggestion.face_id) throw new Error("missing face");
-          const face = faceForId(suggestion.face_id);
-          if (!face) throw new Error("face no longer exists");
-          if (face.person_tag_id !== null && face.label !== suggestion.value)
-            throw new Error("face already has a different label");
-          setFaceLabel(suggestion.face_id, suggestion.value, {
-            source: "review",
-            confidence: suggestion.confidence,
-            runId,
-          });
-          addTagToFile(
-            suggestion.file_id,
-            { key: "people", value: suggestion.value },
-            "review",
-          );
-          promoteFileTagSource(
-            suggestion.file_id,
-            "people",
-            suggestion.value,
-            "review",
-          );
-        } else {
-          const existingPlace = tagsForFile(suggestion.file_id).find(
-            (tag) =>
-              tag.key === "place" &&
-              valueNorm(tag.value) !== valueNorm(suggestion.value),
-          );
-          if (existingPlace)
-            throw new Error("file already has a different place tag");
-          addTagToFile(
-            suggestion.file_id,
-            { key: "place", value: suggestion.value },
-            "review",
-          );
-          promoteFileTagSource(
-            suggestion.file_id,
-            "place",
-            suggestion.value,
-            "review",
-          );
-        }
-        db.prepare(
-          "UPDATE automation_suggestions SET status = 'approved', decided_at = ? WHERE id = ?",
-        ).run(nowIso(), suggestion.id);
-        filesToPersist.add(suggestion.file_id);
+        await withFileLock(suggestion.file_id, async () => {
+          if (suggestion.kind === "face") {
+            if (!suggestion.face_id) throw new Error("missing face");
+            const face = faceForId(suggestion.face_id);
+            if (!face) throw new Error("face no longer exists");
+            if (face.person_tag_id !== null && face.label !== suggestion.value)
+              throw new Error("face already has a different label");
+            setFaceLabel(suggestion.face_id, suggestion.value, {
+              source: "review",
+              confidence: suggestion.confidence,
+              runId: runId!,
+            });
+            addTagToFile(
+              suggestion.file_id,
+              { key: "people", value: suggestion.value },
+              "review",
+            );
+            promoteFileTagSource(
+              suggestion.file_id,
+              "people",
+              suggestion.value,
+              "review",
+            );
+          } else {
+            const existingPlace = tagsForFile(suggestion.file_id).find(
+              (tag) =>
+                tag.key === "place" &&
+                valueNorm(tag.value) !== valueNorm(suggestion.value),
+            );
+            if (existingPlace)
+              throw new Error("file already has a different place tag");
+            addTagToFile(
+              suggestion.file_id,
+              { key: "place", value: suggestion.value },
+              "review",
+            );
+            promoteFileTagSource(
+              suggestion.file_id,
+              "place",
+              suggestion.value,
+              "review",
+            );
+          }
+          db.prepare(
+            "UPDATE automation_suggestions SET status = 'approved', decided_at = ? WHERE id = ?",
+          ).run(nowIso(), suggestion.id);
+          filesToPersist.add(suggestion.file_id);
+        });
       } catch (error) {
         counts.errors++;
         serverLog.warn("review suggestion failed", row.id, error);
@@ -897,9 +1053,7 @@ async function runReviewApproval(
       updateTask({ processed: counts.processed, errors: counts.errors });
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    for (const fileId of filesToPersist) {
-      if (!(await persistFileTags(fileId))) counts.errors++;
-    }
+    await flush();
     invalidateKnownFaces();
     finishTask(
       counts.errors,
@@ -908,9 +1062,16 @@ async function runReviewApproval(
     finishRun(runId, "complete", counts);
   } catch (error) {
     counts.errors++;
+    try {
+      await flush();
+    } catch {
+      // Keep the original failure as the reported task error.
+    }
     finishTask(1, "Review apply failed");
-    finishRun(runId, "failed", counts);
+    if (runId !== null) finishRun(runId, "failed", counts);
     throw error;
+  } finally {
+    if (isTaskRunning()) finishTask(counts.errors, "Review apply stopped");
   }
 }
 

@@ -76,13 +76,14 @@ if you would rather keep the usual country allowlist.
 ```bash
 cd ~/Main/Infra
 bash scripts/validate.sh srv0
-helm upgrade --install srv0-apps targets/srv0/k3s-apps -n apps \
+helm upgrade --install srv0-apps targets/srv0/k3s-apps -n apps --create-namespace \
   -f targets/srv0/k3s-apps/values.yaml \
   -f config/srv0/values.yaml
 ```
 
-Prefer this app-only upgrade for LifeTagger changes. A full `deploy.sh srv0`
-also updates base components and can invalidate Authelia sessions.
+Prefer this app-only upgrade for LifeTagger changes. A full base/app deploy can
+invalidate Authelia sessions. The Infra repo no longer ships
+`scripts/deploy.sh`; the Helm command above is the supported deploy path.
 
 Then open `https://lifetagger.<SERVICES_DOMAIN>`, authenticate with Authelia,
 choose the media subtree (usually `/media`), and let the background index run.
